@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stream Widget Overlay</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color-dark: rgba(15, 15, 20, 0.96);
+            --text-primary-dark: #f1f5f9;
+            --text-secondary-dark: #94a3b8;
+            --divider-dark: rgba(255, 255, 255, 0.1);
+            --shadow-dark: 0 4px 24px rgba(0, 0, 0, 0.4);
+
+            --bg-color-light: rgba(255, 255, 255, 0.98);
+            --text-primary-light: #1e293b;
+            --text-secondary-light: #64748b;
+            --divider-light: rgba(0, 0, 0, 0.08);
+            --shadow-light: 0 4px 24px rgba(0, 0, 0, 0.1);
+
+            --c-bitrate: #3b82f6;
+            --c-fps: #8b5cf6;
+            --c-latency: #10b981;
+            --c-delay: #f59e0b;
+            --c-dropped: #ef4444;
+            --c-online: #22c55e;
+            --c-offline: #ef4444;
+
+            --ts: none;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            background: transparent;
+            overflow: hidden;
+            -webkit-font-smoothing: antialiased;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        .widget-container {
+            position: fixed;
+            left: 0;
+            right: 0;
+            top: 0;
+            bottom: 0;
+            display: flex;
+            justify-content: center;
+            padding: 8px 16px;
+            pointer-events: none;
+            z-index: 1000;
+        }
+
+        .stats-panel {
+            display: flex;
+            width: 100%;
+            height: 100%;
+            justify-content: space-evenly;
+            align-items: center;
+            border-radius: 12px;
+            overflow: hidden;
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            padding: 0 8px;
+
+            opacity: 0;
+            transform: translateY(var(--anim-start, -10px));
+            animation: widgetFadeIn 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+            transition: opacity 0.3s ease;
+        }
+
+        .widget-container[data-position="top"] {
+            --anim-start: -10px;
+        }
+
+        .widget-container[data-position="bottom"] {
+            --anim-start: 10px;
+        }
+
+        @keyframes widgetFadeIn {
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .stats-panel.status-disconnected {
+            opacity: 0.5;
+            filter: grayscale(0.8);
+        }
+
+        body[data-theme="dark"] .stats-panel {
+            background: var(--bg-color-dark);
+            box-shadow: var(--shadow-dark), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+        }
+
+        body[data-theme="light"] .stats-panel {
+            background: var(--bg-color-light);
+            box-shadow: var(--shadow-light), inset 0 1px 0 rgba(255, 255, 255, 0.8);
+        }
+
+        .metric {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 8px 16px;
+            position: relative;
+            text-shadow: var(--ts);
+        }
+
+        .metric-label {
+            font-size: 14px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 2px;
+        }
+
+        body[data-theme="dark"] .metric-label {
+            color: var(--text-secondary-dark);
+        }
+
+        body[data-theme="light"] .metric-label {
+            color: var(--text-secondary-light);
+        }
+
+        .metric-value {
+            font-size: 26px;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+            display: flex;
+            align-items: baseline;
+            gap: 2px;
+        }
+
+        .metric-unit {
+            font-size: 14px;
+            font-weight: 500;
+            opacity: 0.7;
+        }
+
+        body[data-theme="dark"] .metric-value {
+            color: var(--text-primary-dark);
+        }
+
+        body[data-theme="light"] .metric-value {
+            color: var(--text-primary-light);
+        }
+
+        .metric[data-type="bitrate"] .metric-value {
+            color: var(--c-bitrate);
+        }
+
+        .metric[data-type="fps"] .metric-value {
+            color: var(--c-fps);
+        }
+
+        .metric[data-type="latency"] .metric-value {
+            color: var(--c-latency);
+        }
+
+        .metric[data-type="delay"] .metric-value {
+            color: var(--c-delay);
+        }
+
+        .metric[data-type="dropped"] .metric-value.has-drops {
+            color: var(--c-dropped);
+        }
+
+        @media (orientation: portrait) {
+            .stats-panel {
+                flex-direction: column;
+                padding: 16px 0;
+            }
+
+            .metric {
+                width: 100%;
+                padding: 12px 16px;
+                justify-content: center;
+            }
+
+            .metric-label {
+                font-size: 18px;
+                margin-bottom: 4px;
+            }
+
+            .metric-value {
+                font-size: 32px;
+            }
+
+            .metric-unit {
+                font-size: 16px;
+            }
+
+            .metric:not(:last-child)::after {
+                right: 25%;
+                left: 25%;
+                top: auto;
+                bottom: 0;
+                height: 1px;
+                width: 50%;
+            }
+        }
+    </style>
+</head>
+
+<body data-theme="dark">
+
+    <div class="widget-container" data-position="top" id="widgetRoot">
+        <div class="stats-panel status-disconnected" id="statsPanel">
+            <div class="metric" data-type="bitrate">
+                <span class="metric-label">Bitrate</span>
+                <span class="metric-value"><span data-val="bitrate">—</span><span class="metric-unit">kbps</span></span>
+            </div>
+
+            <div class="metric" data-type="fps">
+                <span class="metric-label">FPS</span>
+                <span class="metric-value"><span data-val="fps">—</span></span>
+            </div>
+
+            <div class="metric" data-type="latency">
+                <span class="metric-label">Latency</span>
+                <span class="metric-value"><span data-val="latency">—</span><span class="metric-unit">ms</span></span>
+            </div>
+
+            <div class="metric" data-type="delay">
+                <span class="metric-label">Delay</span>
+                <span class="metric-value"><span data-val="delay">—</span><span class="metric-unit"
+                        id="delayUnit">ms</span></span>
+            </div>
+
+            <div class="metric" data-type="resolution">
+                <span class="metric-label">Res</span>
+                <span class="metric-value"><span data-val="resolution">—</span></span>
+            </div>
+
+            <div class="metric" data-type="dropped">
+                <span class="metric-label">Dropped</span>
+                <span class="metric-value" id="droppedContainer"><span data-val="dropped">0</span></span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class OverlayController {
+            constructor() {
+                this.config = this.parseConfig();
+                this.elements = this.cacheDOM();
+                this.socket = null;
+
+                this.applyConfig();
+                this.initConnection();
+            }
+
+            parseConfig() {
+                const query = new URLSearchParams(window.location.search);
+                return {
+                    ip: query.get('ip') || '127.0.0.1',
+                    port: query.get('port') || '4477',
+                    theme: query.get('theme') || 'dark',
+                    position: query.get('position') || 'top',
+                    bg: query.get('bg') || null,
+                    shadow: query.get('shadow') || null,
+                    targetSource: query.get('source') || null
+                };
+            }
+
+            cacheDOM() {
+                return {
+                    body: document.body,
+                    root: document.getElementById('widgetRoot'),
+                    panel: document.getElementById('statsPanel'),
+                    droppedContainer: document.getElementById('droppedContainer'),
+                    delayUnit: document.getElementById('delayUnit'),
+                    vals: {
+                        bitrate: document.querySelector('[data-val="bitrate"]'),
+                        fps: document.querySelector('[data-val="fps"]'),
+                        latency: document.querySelector('[data-val="latency"]'),
+                        delay: document.querySelector('[data-val="delay"]'),
+                        resolution: document.querySelector('[data-val="resolution"]'),
+                        dropped: document.querySelector('[data-val="dropped"]')
+                    }
+                };
+            }
+
+            applyConfig() {
+                this.elements.body.setAttribute('data-theme', this.config.theme === 'light' ? 'light' : 'dark');
+                this.elements.root.setAttribute('data-position', this.config.position === 'bottom' ? 'bottom' : 'top');
+
+                if (this.config.bg) {
+                    let bgColor = decodeURIComponent(this.config.bg);
+                    if (/^[0-9A-Fa-f]{3,8}$/.test(bgColor)) {
+                        bgColor = '#' + bgColor;
+                    }
+                    if (this.config.theme === 'light') {
+                        document.documentElement.style.setProperty('--bg-color-light', bgColor);
+                    } else {
+                        document.documentElement.style.setProperty('--bg-color-dark', bgColor);
+                    }
+                }
+
+                if (this.config.shadow) {
+                    let shadowVal = decodeURIComponent(this.config.shadow);
+                    if (shadowVal === '1' || shadowVal.toLowerCase() === 'true') {
+                        shadowVal = '0 2px 4px rgba(0,0,0,0.8)';
+                    }
+                    document.documentElement.style.setProperty('--ts', shadowVal);
+                }
+            }
+
+            initConnection() {
+                const wsUrl = `ws://${this.config.ip}:${this.config.port}/`;
+
+                try {
+                    this.socket = new WebSocket(wsUrl);
+                } catch (e) {
+                    console.error("Invalid WebSocket URL:", e);
+                    return;
+                }
+
+                this.socket.onmessage = (event) => {
+                    try {
+                        const payload = JSON.parse(event.data);
+                        if (payload && payload.sources) {
+                            this.processPayload(payload.sources);
+                        }
+                    } catch (e) {
+                        console.warn("Payload parse error");
+                    }
+                };
+
+                this.socket.onclose = () => {
+                    this.updateUI(null);
+                    setTimeout(() => this.initConnection(), 2500);
+                };
+
+                this.socket.onerror = () => {
+                    this.socket.close();
+                };
+            }
+
+            processPayload(sources) {
+                const keys = Object.keys(sources);
+                if (keys.length === 0) {
+                    this.updateUI(null);
+                    return;
+                }
+
+                const activeKey = (this.config.targetSource && sources[this.config.targetSource])
+                    ? this.config.targetSource
+                    : keys[0];
+
+                this.updateUI(sources[activeKey]);
+            }
+
+            updateUI(data) {
+                const isConnected = data && data.connected === true;
+
+                this.elements.panel.classList.toggle('status-disconnected', !isConnected);
+
+                if (!isConnected) {
+                    this.elements.vals.bitrate.textContent = '—';
+                    this.elements.vals.fps.textContent = '—';
+                    this.elements.vals.latency.textContent = '—';
+                    this.elements.vals.delay.textContent = '—';
+                    this.elements.vals.resolution.textContent = '—';
+                    this.elements.vals.dropped.textContent = '0';
+                    this.elements.droppedContainer.classList.remove('has-drops');
+                    this.elements.delayUnit.textContent = 'ms';
+                    return;
+                }
+
+                this.elements.vals.bitrate.textContent = data.kbps || 0;
+                this.elements.vals.fps.textContent = Number(data.fps || 0).toFixed(1);
+                this.elements.vals.latency.textContent = data.latency_ms || 0;
+
+                const delayString = (data.stream_delay_ms >= 1000)
+                    ? (data.stream_delay_ms / 1000).toFixed(1)
+                    : (data.stream_delay_ms || 0);
+
+                this.elements.vals.delay.textContent = delayString;
+                this.elements.delayUnit.textContent = (data.stream_delay_ms >= 1000) ? 's' : 'ms';
+
+                this.elements.vals.resolution.textContent = (data.height)
+                    ? `${data.height}p`
+                    : '—';
+
+                const dropCount = data.dropped_frames || 0;
+                this.elements.vals.dropped.textContent = dropCount;
+                this.elements.droppedContainer.classList.toggle('has-drops', dropCount > 0);
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            window.overlayWidget = new OverlayController();
+        });
+    </script>
+</body>
+
+</html>

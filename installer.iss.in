@@ -1,0 +1,34 @@
+[Setup]
+AppName=Live Stream Source
+AppVersion=@PROJECT_VERSION@
+AppPublisher=Xacnio
+DefaultDirName={code:GetDefaultDirName}
+DisableProgramGroupPage=yes
+OutputDir=..\Output
+OutputBaseFilename=live-stream-source-@PROJECT_VERSION@-windows-installer
+Compression=lzma
+SolidCompression=yes
+ArchitecturesAllowed=x64
+ArchitecturesInstallIn64BitMode=x64
+
+[Files]
+Source: "Release\live-stream-source.dll"; DestDir: "{app}\obs-plugins\64bit"; Flags: ignoreversion
+Source: "Release\live-stream-source.pdb"; DestDir: "{app}\obs-plugins\64bit"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\data\locale\*"; DestDir: "{app}\data\obs-plugins\live-stream-source\locale"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Messages]
+WelcomeLabel2=This will install the Live Stream Source plugin on your computer.%n%nIt is recommended that you close OBS Studio before continuing.
+
+[Code]
+function GetDefaultDirName(Param: String): String;
+var
+  OBSPath: String;
+begin
+  if RegQueryStringValue(HKLM, 'SOFTWARE\OBS Studio', '', OBSPath) then begin
+    Result := OBSPath;
+  end else if RegQueryStringValue(HKLM64, 'SOFTWARE\OBS Studio', '', OBSPath) then begin
+    Result := OBSPath;
+  end else begin
+    Result := ExpandConstant('{autopf}\obs-studio');
+  end;
+end;

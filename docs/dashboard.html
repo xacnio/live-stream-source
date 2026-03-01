@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Stream Source - Remote Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0c0c14;
+            --surface: #1a1a2e;
+            --surface-hover: #22223b;
+            --border: #2d2d44;
+            --text-primary: #f0f0f5;
+            --text-secondary: #9aa0a6;
+            --accent: #6c5ce7;
+            --accent-hover: #8172f3;
+            --success: #2ecc71;
+            --danger: #e74c3c;
+            --warning: #f1c40f;
+            --radius-md: 10px;
+            --radius-sm: 6px;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background-color: var(--bg-color);
+            background-image:
+                radial-gradient(circle at 15% 50%, rgba(108, 92, 231, 0.08) 0%, transparent 50%),
+                radial-gradient(circle at 85% 30%, rgba(46, 204, 113, 0.05) 0%, transparent 50%);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 40px 24px;
+        }
+
+        .dashboard-container {
+            width: 100%;
+            max-width: 900px;
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 8px;
+        }
+
+        .header h1 {
+            font-size: 24px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+        }
+
+        .header h1 span {
+            color: var(--accent);
+        }
+
+        .connection-panel {
+            background: rgba(26, 26, 46, 0.6);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            padding: 16px 20px;
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+            transition: border-color 0.3s ease;
+        }
+
+        .connection-panel:focus-within {
+            border-color: var(--accent);
+        }
+
+        .input-group {
+            flex: 1;
+            position: relative;
+        }
+
+        input[type="text"] {
+            width: 100%;
+            background: rgba(12, 12, 20, 0.5);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 12px 16px;
+            border-radius: var(--radius-sm);
+            font-family: 'Inter', monospace;
+            font-size: 14px;
+            transition: all 0.2s ease;
+            outline: none;
+        }
+
+        input[type="text"]:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(108, 92, 231, 0.15);
+        }
+
+        button.btn-connect {
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: var(--radius-sm);
+            font-weight: 600;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        button.btn-connect:hover {
+            background: var(--accent-hover);
+            transform: translateY(-1px);
+        }
+
+        button.btn-connect:active {
+            transform: translateY(1px);
+        }
+
+        .source-tabs {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            justify-content: flex-start;
+        }
+
+        .source-tab {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            color: var(--text-secondary);
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            user-select: none;
+        }
+
+        .source-tab:hover {
+            border-color: var(--accent);
+            color: var(--text-primary);
+        }
+
+        .source-tab.active {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: white;
+            box-shadow: 0 4px 12px rgba(108, 92, 231, 0.3);
+        }
+
+        .dashboard-content {
+            background: rgba(26, 26, 46, 0.4);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            padding: 32px;
+            min-height: 400px;
+            display: flex;
+            flex-direction: column;
+            gap: 32px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+        }
+
+        .empty-state {
+            margin: auto;
+            text-align: center;
+            color: var(--text-secondary);
+            font-size: 14px;
+        }
+
+        .status-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 20px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: 600;
+            font-size: 15px;
+        }
+
+        .connection-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--danger);
+            box-shadow: 0 0 8px rgba(231, 76, 60, 0.5);
+            transition: all 0.3s ease;
+        }
+
+        .connection-dot.connected {
+            background: var(--success);
+            box-shadow: 0 0 10px rgba(46, 204, 113, 0.5);
+        }
+
+        .uptime-display {
+            font-size: 13px;
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+
+        .grid-section {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .section-title {
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .section-title::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: linear-gradient(90deg, rgba(255, 255, 255, 0.05) 0%, transparent 100%);
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 16px;
+        }
+
+        .stat-card {
+            background: rgba(12, 12, 20, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.03);
+            border-radius: var(--radius-sm);
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            transition: transform 0.2s ease, background 0.2s ease;
+        }
+
+        .stat-card:hover {
+            background: var(--surface-hover);
+            transform: translateY(-2px);
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+
+        .stat-value {
+            font-size: 20px;
+            font-weight: 700;
+            color: var(--text-primary);
+            font-variant-numeric: tabular-nums;
+            display: flex;
+            align-items: baseline;
+            gap: 4px;
+        }
+
+        .stat-unit {
+            font-size: 12px;
+            font-weight: 500;
+            color: rgba(255, 255, 255, 0.4);
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .badge-success {
+            background: rgba(46, 204, 113, 0.15);
+            color: var(--success);
+        }
+
+        .badge-danger {
+            background: rgba(231, 76, 60, 0.15);
+            color: var(--danger);
+        }
+
+        .badge-neutral {
+            background: rgba(255, 255, 255, 0.1);
+            color: var(--text-secondary);
+        }
+
+        .badge-warning {
+            background: rgba(241, 196, 15, 0.15);
+            color: var(--warning);
+        }
+
+        .global-status {
+            text-align: center;
+            font-size: 13px;
+            color: var(--text-secondary);
+            opacity: 0.8;
+        }
+
+        .color-accent {
+            color: var(--accent) !important;
+        }
+
+        .color-success {
+            color: var(--success) !important;
+        }
+
+        .color-warning {
+            color: var(--warning) !important;
+        }
+
+        .color-danger {
+            color: var(--danger) !important;
+        }
+
+        @media (max-width: 600px) {
+            .connection-panel {
+                flex-direction: column;
+                align-items: stretch;
+            }
+
+            .dashboard-content {
+                padding: 20px;
+            }
+
+            .stats-grid {
+                grid-template-columns: 1fr 1fr;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="dashboard-container">
+        <div class="header">
+            <h1><span>▶</span> Live Stream Source Dashboard</h1>
+        </div>
+
+        <div class="connection-panel">
+            <div class="input-group">
+                <input type="text" id="wsInput" placeholder="ws://127.0.0.1:4477/" value="ws://127.0.0.1:4477/">
+            </div>
+            <button class="btn-connect" id="connectBtn">Connect to Server</button>
+        </div>
+
+        <div class="source-tabs" id="sourceTabs">
+            <!-- Tabs injected dynamically -->
+        </div>
+
+        <div class="dashboard-content" id="dashboardContent">
+            <div class="empty-state">
+                <p>Waiting for connection...</p>
+            </div>
+        </div>
+
+        <div class="global-status" id="globalStatus">Disconnected</div>
+    </div>
+
+    <script>
+        class DashboardController {
+            constructor() {
+                this.socket = null;
+                this.sourcesData = {};
+                this.activeSourceId = null;
+
+                this.elements = {
+                    input: document.getElementById('wsInput'),
+                    btnConnect: document.getElementById('connectBtn'),
+                    tabsContainer: document.getElementById('sourceTabs'),
+                    contentContainer: document.getElementById('dashboardContent'),
+                    globalStatus: document.getElementById('globalStatus')
+                };
+
+                this.bindEvents();
+                this.initConnection();
+            }
+
+            bindEvents() {
+                this.elements.btnConnect.addEventListener('click', () => {
+                    this.initConnection(this.elements.input.value);
+                });
+
+                this.elements.input.addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') this.initConnection(this.elements.input.value);
+                });
+            }
+
+            initConnection(url = null) {
+                const targetUrl = url || this.elements.input.value;
+
+                if (this.socket) {
+                    this.socket.close();
+                }
+
+                this.elements.globalStatus.textContent = `Connecting to ${targetUrl}...`;
+                this.elements.globalStatus.style.color = 'var(--text-secondary)';
+
+                try {
+                    this.socket = new WebSocket(targetUrl);
+                } catch (err) {
+                    this.elements.globalStatus.textContent = `Invalid URL provided.`;
+                    return;
+                }
+
+                this.socket.onopen = () => {
+                    this.elements.globalStatus.textContent = `Connected securely to ${targetUrl}`;
+                    this.elements.globalStatus.style.color = 'var(--success)';
+                };
+
+                this.socket.onmessage = (event) => {
+                    try {
+                        const payload = JSON.parse(event.data);
+                        if (payload && payload.sources) {
+                            this.handleIncomingData(payload.sources);
+                        }
+                    } catch (e) {
+                        console.error("Failed to parse WebSocket message", e);
+                    }
+                };
+
+                this.socket.onclose = () => {
+                    this.elements.globalStatus.textContent = 'Disconnected from server.';
+                    this.elements.globalStatus.style.color = 'var(--danger)';
+                };
+
+                this.socket.onerror = (err) => {
+                    console.error("WebSocket encountered an error:", err);
+                    this.socket.close();
+                };
+            }
+
+            handleIncomingData(sources) {
+                this.sourcesData = sources;
+                const sourceNames = Object.keys(this.sourcesData);
+
+                if (!this.activeSourceId || !this.sourcesData[this.activeSourceId]) {
+                    this.activeSourceId = sourceNames.length > 0 ? sourceNames[0] : null;
+                }
+
+                this.renderTabs(sourceNames);
+                this.renderDashboard();
+            }
+
+            switchSource(sourceId) {
+                if (this.sourcesData[sourceId]) {
+                    this.activeSourceId = sourceId;
+                    this.renderTabs(Object.keys(this.sourcesData));
+                    this.renderDashboard();
+                }
+            }
+
+            renderTabs(sourceNames) {
+                this.elements.tabsContainer.innerHTML = '';
+
+                sourceNames.forEach(name => {
+                    const btn = document.createElement('div');
+                    btn.classList.add('source-tab');
+                    if (name === this.activeSourceId) {
+                        btn.classList.add('active');
+                    }
+                    btn.textContent = name;
+                    btn.addEventListener('click', () => this.switchSource(name));
+                    this.elements.tabsContainer.appendChild(btn);
+                });
+            }
+
+            renderDashboard() {
+                if (!this.activeSourceId) {
+                    this.elements.contentContainer.innerHTML = `
+                        <div class="empty-state">
+                            <p>No active sources found. Start a stream in OBS.</p>
+                        </div>
+                    `;
+                    return;
+                }
+
+                const data = this.sourcesData[this.activeSourceId];
+                const htmlTemplate = this.generateDashboardHTML(data);
+                this.elements.contentContainer.innerHTML = htmlTemplate;
+            }
+
+            formatBytes(bytes) {
+                if (bytes === 0) return '0 B';
+                const k = 1024;
+                const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+                const i = Math.floor(Math.log(bytes) / Math.log(k));
+                return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+            }
+
+            formatUptime(seconds) {
+                if (!seconds || seconds <= 0) return '00:00:00';
+                const h = Math.floor(seconds / 3600).toString().padStart(2, '0');
+                const m = Math.floor((seconds % 3600) / 60).toString().padStart(2, '0');
+                const s = Math.floor(seconds % 60).toString().padStart(2, '0');
+                return `${h}:${m}:${s}`;
+            }
+
+            generateDashboardHTML(data) {
+                const isConnected = data.connected === true;
+                const resolutionText = (data.width && data.height) ? `${data.width} × ${data.height}` : '—';
+
+                return `
+                    <div class="status-header">
+                        <div class="status-indicator">
+                            <div class="connection-dot ${isConnected ? 'connected' : ''}"></div>
+                            <span style="color: ${isConnected ? 'var(--text-primary)' : 'var(--text-secondary)'}">
+                                ${isConnected ? 'Receiving Media' : 'Source Disconnected'}
+                            </span>
+                        </div>
+                        <div class="uptime-display">
+                            Session Uptime: <span>${this.formatUptime(data.uptime_s || 0)}</span>
+                        </div>
+                    </div>
+
+                    <div class="grid-section">
+                        <div class="section-title">Stream Details</div>
+                        <div class="stats-grid">
+                            <div class="stat-card">
+                                <span class="stat-label">Resolution</span>
+                                <span class="stat-value">${resolutionText}</span>
+                            </div>
+                            <div class="stat-card">
+                                <span class="stat-label">Video Format</span>
+                                <span class="stat-value">${data.video_codec || '—'} 
+                                    ${data.hw_accel ? '<span class="badge badge-success" style="margin-left: 8px;">HW</span>' : ''}
+                                </span>
+                            </div>
+                            <div class="stat-card">
+                                <span class="stat-label">Audio Format</span>
+                                <span class="stat-value">${data.audio_codec || '—'}</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="grid-section">
+                        <div class="section-title">Real-time Performance</div>
+                        <div class="stats-grid">
+                            <div class="stat-card">
+                                <span class="stat-label">Bitrate</span>
+                                <span class="stat-value color-accent">${data.kbps || 0} <span class="stat-unit">kbps</span></span>
+                            </div>
+                            <div class="stat-card">
+                                <span class="stat-label">Framerate</span>
+                                <span class="stat-value color-warning">${Number(data.fps || 0).toFixed(2)} <span class="stat-unit">fps</span></span>
+                            </div>
+                            <div class="stat-card">
+                                <span class="stat-label">Buffer Latency</span>
+                                <span class="stat-value ${data.latency_ms > 500 ? 'color-warning' : 'color-success'}">
+                                    ${data.latency_ms || 0} <span class="stat-unit">ms</span>
+                                </span>
+                            </div>
+                            <div class="stat-card">
+                                <span class="stat-label">Stream Delay</span>
+                                <span class="stat-value">
+                                    ${(data.stream_delay_ms || 0) >= 1000 ? ((data.stream_delay_ms || 0) / 1000).toFixed(1) + '<span class="stat-unit">s</span>' : (data.stream_delay_ms || 0) + '<span class="stat-unit">ms</span>'}
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="grid-section">
+                        <div class="section-title">Diagnostics & Network</div>
+                        <div class="stats-grid">
+                            <div class="stat-card">
+                                <span class="stat-label">Catch-up Engine</span>
+                                <span class="stat-value">
+                                    ${data.catchup_active
+                        ? '<span class="badge badge-warning">Active (' + data.catchup_drift_ms + ' ms)</span>'
+                        : '<span class="badge badge-neutral">Idle</span>'}
+                                </span>
+                            </div>
+                            <div class="stat-card">
+                                <span class="stat-label">Dropped Frames</span>
+                                <span class="stat-value ${(data.dropped_frames || 0) > 0 ? 'color-danger' : ''}">
+                                    ${data.dropped_frames || 0} <span class="stat-unit">total</span>
+                                </span>
+                            </div>
+                            <div class="stat-card">
+                                <span class="stat-label">Video Data RX</span>
+                                <span class="stat-value">${this.formatBytes(data.total_bytes_video || 0)}</span>
+                            </div>
+                            <div class="stat-card">
+                                <span class="stat-label">Audio Data RX</span>
+                                <span class="stat-value">${this.formatBytes(data.total_bytes_audio || 0)}</span>
+                            </div>
+                            <div class="stat-card">
+                                <span class="stat-label">Network Reset</span>
+                                <span class="stat-value">${data.reconnects || 0} <span class="stat-unit">times</span></span>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            window.appController = new DashboardController();
+        });
+    </script>
+</body>
+
+</html>

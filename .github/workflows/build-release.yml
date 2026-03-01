@@ -1,0 +1,272 @@
+name: Build Plugin Release
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: windows-x64
+          - os: ubuntu-latest
+            artifact_name: x86_64-linux-gnu
+          - os: macos-14
+            artifact_name: macos-apple
+            mac_arch: Apple
+            mac_deps_arch: arm64
+            mac_qt6_arch: arm64
+          - os: macos-14
+            artifact_name: macos-intel
+            mac_arch: Intel
+            mac_deps_arch: x86_64
+            mac_qt6_arch: universal
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\CI\install_windows_deps.ps1
+
+      - name: Install Qt (Windows)
+        if: runner.os == 'Windows'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.6.3'
+          arch: 'win64_msvc2019_64'
+
+      - name: Install Dependencies and Build OBS (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          chmod +x ./CI/install_linux_deps.sh
+          ./CI/install_linux_deps.sh
+
+      - name: Install Dependencies (macOS)
+        if: startsWith(runner.os, 'macOS')
+        run: |
+          chmod +x ./CI/install_macos_deps.sh
+          ./CI/install_macos_deps.sh "${{ matrix.mac_deps_arch }}" "${{ matrix.mac_qt6_arch }}" "${{ matrix.mac_arch }}"
+
+      - name: Configure CMake
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            cmake -B build -DOBS_SOURCE_DIR="C:/obs-studio-src" -DOBS_BIN_DIR="C:/obs-studio-bin/bin/64bit" -DFFMPEG_DIR="C:/obs-deps" -DCMAKE_BUILD_TYPE=Release
+          elif [ "$RUNNER_OS" == "macOS" ]; then
+            export PKG_CONFIG_PATH="/tmp/obs-deps/lib/pkgconfig:$(brew --prefix ffmpeg)/lib/pkgconfig:$PKG_CONFIG_PATH"
+            cmake -B build -DCMAKE_BUILD_TYPE=Release -DOBS_SOURCE_DIR="/tmp/obs-studio-src" -DOBS_BIN_DIR="/tmp/OBS.app/Contents/Frameworks" -DFFMPEG_DIR="/tmp/obs-deps" -DQt6_DIR="/tmp/qt6/lib/cmake/Qt6" -DCMAKE_OSX_ARCHITECTURES="${{ matrix.mac_deps_arch }}"
+          else
+            cmake -B build -DCMAKE_BUILD_TYPE=Release -DOBS_SOURCE_DIR="/tmp/obs-studio-src" -DOBS_BIN_DIR="/tmp/obs-studio-installed"
+          fi
+
+      - name: Build Plugin
+        run: cmake --build build --config Release
+
+      - name: Build Windows Installer
+        if: runner.os == 'Windows'
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" build\installer.iss
+
+      - name: Archive Windows Installer
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: Output/*.exe
+          retention-days: 1
+
+      - name: Prepare Windows Package
+        if: runner.os == 'Windows'
+        run: |
+          mkdir -p package/obs-plugins/live-stream-source/bin/64bit
+          mkdir -p package/data/obs-plugins/live-stream-source/locale
+          cp build/Release/*live-stream-source*.dll package/obs-plugins/live-stream-source/bin/64bit/live-stream-source.dll
+          cp build/Release/*live-stream-source*.pdb package/obs-plugins/live-stream-source/bin/64bit/live-stream-source.pdb || true
+          cp -r data/locale/* package/data/obs-plugins/live-stream-source/locale/
+
+      - name: Archive Artifacts (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: package/
+          retention-days: 1
+
+      - name: Prepare Linux Package
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p package/live-stream-source/bin/64bit
+          mkdir -p package/live-stream-source/data/locale
+          cp build/*live-stream-source*.so package/live-stream-source/bin/64bit/live-stream-source.so
+          cp -r data/locale/* package/live-stream-source/data/locale/
+
+      - name: Archive Artifacts (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: package/
+          retention-days: 1
+
+      - name: Prepare macOS Package
+        if: startsWith(runner.os, 'macOS')
+        run: |
+          PLUGIN="package/live-stream-source.plugin/Contents"
+          mkdir -p "$PLUGIN/MacOS"
+          mkdir -p "$PLUGIN/Resources/locale"
+          cp build/*live-stream-source*.so "$PLUGIN/MacOS/live-stream-source.so"
+          cp -r data/locale/* "$PLUGIN/Resources/locale/"
+
+      - name: Archive Artifacts (macOS)
+        if: startsWith(runner.os, 'macOS')
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: package/
+          retention-days: 1
+
+  universal-mac:
+    name: Create macOS Universal Binary
+    needs: build
+    runs-on: macos-14
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Universal Plugin Bundle
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          if [ -z "$VERSION" ] || [ "$VERSION" = "$GITHUB_REF" ]; then
+            VERSION="0.0.0"
+          fi
+
+          # Create .plugin bundle
+          PLUGIN="universal_package/live-stream-source.plugin/Contents"
+          mkdir -p "$PLUGIN/MacOS"
+          mkdir -p "$PLUGIN/Resources/locale"
+
+          lipo -create -output "$PLUGIN/MacOS/live-stream-source.so" \
+               artifacts/macos-apple/live-stream-source.plugin/Contents/MacOS/live-stream-source.so \
+               artifacts/macos-intel/live-stream-source.plugin/Contents/MacOS/live-stream-source.so
+
+          cp -r data/locale/* "$PLUGIN/Resources/locale/"
+
+          # ── Build installer for user home directory ──
+          # Step 1: Create a component package that installs relative to the target location
+          PKG_ROOT="pkg_root/live-stream-source.plugin"
+          mkdir -p "pkg_root"
+          cp -r universal_package/live-stream-source.plugin "$PKG_ROOT"
+
+          pkgbuild --root pkg_root \
+                   --identifier com.xacnio.live-stream-source.component \
+                   --version "$VERSION" \
+                   --install-location "Library/Application Support/obs-studio/plugins" \
+                   "live-stream-source.pkg"
+
+          # Step 2: Create a Distribution XML that restricts installation to the user's home directory
+          cat > distribution.xml << 'DISTEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <installer-gui-script minSpecVersion="2">
+              <title>Live Stream Source</title>
+              
+              <!-- Allow ONLY installation to the user's home directory -->
+              <domains enable_currentUserHome="true" enable_localSystem="false" enable_anywhere="false" />
+              
+              <options customize="never" require-scripts="false" hostArchitectures="x86_64,arm64"/>
+              <choices-outline>
+                  <line choice="default"/>
+              </choices-outline>
+              <choice id="default" title="Live Stream Source">
+                  <pkg-ref id="com.xacnio.live-stream-source.component"/>
+              </choice>
+              <pkg-ref id="com.xacnio.live-stream-source.component" version="VERSION_PLACEHOLDER" onConclusion="none">live-stream-source.pkg</pkg-ref>
+          </installer-gui-script>
+          DISTEOF
+
+          # Replace version placeholder
+          sed -i '' "s/VERSION_PLACEHOLDER/$VERSION/g" distribution.xml
+
+          # Step 3: Build the final product archive
+          mkdir -p final_installer
+          productbuild --distribution distribution.xml \
+                       --package-path . \
+                       "final_installer/live-stream-source-${VERSION}-macos-universal.pkg"
+
+      - name: Upload Universal Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-universal
+          path: universal_package/
+          retention-days: 1
+
+      - name: Upload macOS Installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-installer
+          path: final_installer/*.pkg
+          retention-days: 1
+
+  release:
+    name: Create GitHub Release
+    needs: [build, universal-mac]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Zip Artifacts
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          mkdir -p artifacts
+          cd artifacts
+          rm -rf macos-apple macos-intel
+          for dir in */; do
+            if [ -d "$dir" ]; then
+              folder_name="${dir%/}"
+              if [ "$folder_name" == "windows-installer" ]; then
+                mv "$dir"/*.exe ../
+              else
+                zip_name="live-stream-source-${VERSION}-${folder_name}.zip"
+                (cd "$dir" && zip -r "../$zip_name" .)
+              fi
+            fi
+          done
+          # Copy zip files directly into artifacts root for the release pattern
+          mv *.zip ../
+
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            *.zip
+            *.exe
+            *.pkg
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
