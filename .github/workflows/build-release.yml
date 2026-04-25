@@ -77,12 +77,13 @@ jobs:
 
       - name: List Available DLLs (Windows Debug)
         if: runner.os == 'Windows'
+        shell: bash
         run: |
           echo "=== Checking C:/obs-deps/bin ==="
-          ls -la C:/obs-deps/bin/*.dll || echo "No DLLs found in C:/obs-deps/bin"
+          ls -la C:/obs-deps/bin/*.dll 2>/dev/null || echo "No DLLs found in C:/obs-deps/bin"
           echo ""
           echo "=== Checking build/Release ==="
-          ls -la build/Release/*.dll || echo "No DLLs found in build/Release"
+          ls -la build/Release/*.dll 2>/dev/null || echo "No DLLs found in build/Release"
 
       - name: Build Windows Installer
         if: runner.os == 'Windows'
@@ -99,6 +100,7 @@ jobs:
 
       - name: Prepare Windows Package
         if: runner.os == 'Windows'
+        shell: bash
         run: |
           mkdir -p package/obs-plugins/live-stream-source/bin/64bit
           mkdir -p package/data/obs-plugins/live-stream-source/locale
