@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(live-stream-source VERSION 1.0.0 LANGUAGES C CXX)
+project(live-stream-source VERSION 1.1.0 LANGUAGES C CXX)
 
 get_filename_component(_cmake_cxx_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
 

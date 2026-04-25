@@ -75,6 +75,15 @@ jobs:
       - name: Build Plugin
         run: cmake --build build --config Release
 
+      - name: List Available DLLs (Windows Debug)
+        if: runner.os == 'Windows'
+        run: |
+          echo "=== Checking C:/obs-deps/bin ==="
+          ls -la C:/obs-deps/bin/*.dll || echo "No DLLs found in C:/obs-deps/bin"
+          echo ""
+          echo "=== Checking build/Release ==="
+          ls -la build/Release/*.dll || echo "No DLLs found in build/Release"
+
       - name: Build Windows Installer
         if: runner.os == 'Windows'
         run: |
@@ -95,6 +104,20 @@ jobs:
           mkdir -p package/data/obs-plugins/live-stream-source/locale
           cp build/Release/*live-stream-source*.dll package/obs-plugins/live-stream-source/bin/64bit/live-stream-source.dll
           cp build/Release/*live-stream-source*.pdb package/obs-plugins/live-stream-source/bin/64bit/live-stream-source.pdb || true
+          
+          # Copy OpenSSL DLLs if they exist
+          echo "Searching for OpenSSL DLLs..."
+          find C:/obs-deps -name "libcrypto*.dll" -o -name "libssl*.dll" || echo "OpenSSL DLLs not found in obs-deps"
+          
+          # Try common locations
+          cp C:/obs-deps/bin/libcrypto-3-x64.dll package/obs-plugins/live-stream-source/bin/64bit/ 2>/dev/null || \
+          cp C:/obs-deps/bin/libcrypto*.dll package/obs-plugins/live-stream-source/bin/64bit/ 2>/dev/null || \
+          echo "Warning: libcrypto DLL not found"
+          
+          cp C:/obs-deps/bin/libssl-3-x64.dll package/obs-plugins/live-stream-source/bin/64bit/ 2>/dev/null || \
+          cp C:/obs-deps/bin/libssl*.dll package/obs-plugins/live-stream-source/bin/64bit/ 2>/dev/null || \
+          echo "Warning: libssl DLL not found"
+          
           cp -r data/locale/* package/data/obs-plugins/live-stream-source/locale/
 
       - name: Archive Artifacts (Windows)

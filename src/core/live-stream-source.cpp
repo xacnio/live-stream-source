@@ -70,6 +70,10 @@ LiveStreamSource::LiveStreamSource(obs_source_t *source, obs_data_t *settings)
   video_base_pts_ns_ = 0;
   video_start_pts_rtp_ = 0;
 
+  // Initialize queues with default capacity
+  video_queue_ = std::make_unique<VideoFrameQueue>(FRAME_QUEUE_CAPACITY);
+  audio_queue_ = std::make_unique<AudioFrameQueue>(FRAME_QUEUE_CAPACITY);
+
   init_stats_dir();
   install_stats_html();
   install_overlay_html();
@@ -94,6 +98,10 @@ void LiveStreamSource::update(obs_data_t *settings) {
   bool new_hw_decode = obs_data_get_bool(settings, PROP_HW_DECODE);
   auto new_stream_type =
       static_cast<StreamType>(obs_data_get_int(settings, PROP_STREAM_TYPE));
+  
+  // Buffer configuration
+  int new_preset = static_cast<int>(obs_data_get_int(settings, PROP_BUFFER_PRESET));
+  int new_custom = static_cast<int>(obs_data_get_int(settings, PROP_BUFFER_CUSTOM));
 
   const char *lb_src = obs_data_get_string(settings, PROP_LOW_BITRATE_SOURCE);
   const char *dc_src = obs_data_get_string(settings, PROP_DISCONNECT_SOURCE);
@@ -107,7 +115,16 @@ void LiveStreamSource::update(obs_data_t *settings) {
   low_bitrate_kbps_ = (new_kbps > 0) ? new_kbps : DEFAULT_LOW_BITRATE_KBPS;
   auto_catchup_ = new_catchup;
   hw_decode_ = new_hw_decode;
+  bool prev_shimmer = show_shimmer_;
+  show_shimmer_ = obs_data_get_bool(settings, PROP_SHOW_SHIMMER);
+  
+  // If shimmer was just disabled, clear the frame immediately
+  if (prev_shimmer && !show_shimmer_ && !first_frame_received_.load()) {
+    obs_source_output_video2(obs_source_, nullptr);
+  }
   stream_type_ = new_stream_type;
+  buffer_preset_ = static_cast<BufferPreset>(new_preset);
+  custom_buffer_frames_ = std::clamp(new_custom, BUFFER_SIZE_MIN, BUFFER_SIZE_MAX);
   low_bitrate_src_name_ = lb_src ? lb_src : "";
   disconnect_src_name_ = dc_src ? dc_src : "";
   loading_src_name_ = ld_src ? ld_src : "";
@@ -122,6 +139,27 @@ void LiveStreamSource::update(obs_data_t *settings) {
 
   bitrate_mon_.set_threshold_kbps(low_bitrate_kbps_);
   catchup_.set_enabled(auto_catchup_);
+
+  // Calculate new buffer size
+  int new_buffer_size = calculate_buffer_size();
+  
+  // Log buffer configuration
+  const char* preset_name = "Unknown";
+  switch (buffer_preset_) {
+    case BufferPreset::Auto: preset_name = "Auto"; break;
+    case BufferPreset::UltraLowLatency: preset_name = "Ultra Low Latency"; break;
+    case BufferPreset::LowLatency: preset_name = "Low Latency"; break;
+    case BufferPreset::Balanced: preset_name = "Balanced"; break;
+    case BufferPreset::Stable: preset_name = "Stable"; break;
+    case BufferPreset::MaxStability: preset_name = "Max Stability"; break;
+    case BufferPreset::Custom: preset_name = "Custom"; break;
+  }
+  lss_log_info("Buffer preset: %s → %d frames", preset_name, new_buffer_size);
+  
+  // Recreate queues if size changed
+  if (!video_queue_ || video_queue_->capacity() != new_buffer_size) {
+    recreate_frame_queues(new_buffer_size);
+  }
 
   prev_disconnected_.store(!connected_.load());
   prev_low_bitrate_.store(!bitrate_mon_.is_low());
@@ -214,9 +252,21 @@ void LiveStreamSource::output_video_frame(AVFrame *frame) {
     }
 
     if (!has_pts_offset_) {
-      pts_to_obs_offset_ns_ =
-          static_cast<int64_t>(os_gettime_ns()) - stream_pts_ns;
-      has_pts_offset_ = true;
+      // Wait for both audio and video before anchoring
+      // This prevents initial desync (100-200ms)
+      first_video_pts_ns_ = stream_pts_ns;
+      
+      if (first_audio_pts_ns_ != 0 || demuxer_.audio_stream_index() < 0) {
+        // Audio already arrived OR no audio stream - anchor now
+        int64_t anchor_pts = (first_audio_pts_ns_ != 0) 
+                              ? std::min(first_video_pts_ns_, first_audio_pts_ns_)
+                              : first_video_pts_ns_;
+        pts_to_obs_offset_ns_ = static_cast<int64_t>(os_gettime_ns()) - anchor_pts;
+        has_pts_offset_ = true;
+        lss_log_info("PTS anchored: video=%lld ns, audio=%lld ns, anchor=%lld ns",
+                     (long long)first_video_pts_ns_, (long long)first_audio_pts_ns_,
+                     (long long)anchor_pts);
+      }
     }
     computed_ts = stream_pts_ns + pts_to_obs_offset_ns_;
   }
@@ -320,9 +370,6 @@ void LiveStreamSource::output_audio_frame(DecodedAudioFrame &af) {
   if (!af.data)
     return;
 
-  if (!has_pts_offset_)
-    return;
-
   obs_source_audio obs_audio = {};
 
   int bytes_per_sample = sizeof(float);
@@ -341,14 +388,32 @@ void LiveStreamSource::output_audio_frame(DecodedAudioFrame &af) {
   int64_t audio_pts_ns = af.pts_us * 1000; // us -> ns
 
   if (!has_pts_offset_) {
-    pts_to_obs_offset_ns_ =
-        static_cast<int64_t>(os_gettime_ns()) - audio_pts_ns;
-    has_pts_offset_ = true;
+    // Wait for both audio and video before anchoring
+    // This prevents initial desync (100-200ms)
+    first_audio_pts_ns_ = audio_pts_ns;
+    
+    if (first_video_pts_ns_ != 0 || demuxer_.video_stream_index() < 0) {
+      // Video already arrived OR no video stream - anchor now
+      int64_t anchor_pts = (first_video_pts_ns_ != 0)
+                            ? std::min(first_video_pts_ns_, first_audio_pts_ns_)
+                            : first_audio_pts_ns_;
+      pts_to_obs_offset_ns_ = static_cast<int64_t>(os_gettime_ns()) - anchor_pts;
+      has_pts_offset_ = true;
+      lss_log_info("PTS anchored: video=%lld ns, audio=%lld ns, anchor=%lld ns",
+                   (long long)first_video_pts_ns_, (long long)first_audio_pts_ns_,
+                   (long long)anchor_pts);
+    } else {
+      // Waiting for video - don't output audio yet
+      return;
+    }
   }
 
   int64_t audio_computed = audio_pts_ns + pts_to_obs_offset_ns_;
   obs_audio.timestamp = static_cast<uint64_t>(audio_computed);
 
+  // Gentle audio pacing for HLS streams
+  // Only pace if audio is VERY far ahead of video (>100ms)
+  // This prevents audio rushing ahead while avoiding OBS buffering messages
   bool is_hls = (stream_type_ == StreamType::HLS) ||
                 (stream_type_ == StreamType::AmazonIVS);
   if (is_hls && catchup_first_wall_ms_ != 0) {
@@ -356,12 +421,12 @@ void LiveStreamSource::output_audio_frame(DecodedAudioFrame &af) {
     int64_t pts_elapsed = pts_ms - catchup_first_pts_ms_;
     int64_t wall_elapsed = now_ms() - catchup_first_wall_ms_;
     int64_t ahead_ms = pts_elapsed - wall_elapsed;
-
-    while (ahead_ms > 5 && running_.load()) {
-      int sleep = (ahead_ms > 10) ? 10 : (int)ahead_ms;
+    
+    // Only pace if significantly ahead (>100ms threshold)
+    // Use gentle pacing (sleep half the ahead time, max 10ms)
+    if (ahead_ms > 100) {
+      int sleep = std::min(10, static_cast<int>(ahead_ms / 2));
       std::this_thread::sleep_for(std::chrono::milliseconds(sleep));
-      wall_elapsed = now_ms() - catchup_first_wall_ms_;
-      ahead_ms = pts_elapsed - wall_elapsed;
     }
   }
 
@@ -537,6 +602,9 @@ void LiveStreamSource::worker_thread_func() {
             catching_up_ = catchup_.is_enabled();
             catchup_first_wall_ms_ = 0;
             catchup_first_pts_ms_ = 0;
+            // Hide disconnect source on successful reconnect
+            prev_disconnected_.store(true); // Force re-evaluation
+            update_source_toggles();
           } else {
             reconnect_mgr_.mark_failed();
           }
@@ -577,7 +645,15 @@ void LiveStreamSource::worker_thread_func() {
 
         has_pts_offset_ = false;
         pts_to_obs_offset_ns_ = 0;
+        first_video_pts_ns_ = 0;
+        first_audio_pts_ns_ = 0;
+        
+        // Clear last frame and output shimmer immediately
+        obs_source_output_video2(obs_source_, nullptr);
+        output_shimmer_frame();  // Show shimmer immediately
+        
         write_stats_json();
+        update_source_toggles();
 
         av_packet_unref(pkt);
 
@@ -667,6 +743,9 @@ void LiveStreamSource::worker_thread_func() {
             int64_t elapsed_wall = wall_ms - delay_ref_wall_ms_;
             int64_t elapsed_pts = pts_ms - delay_ref_pts_ms_;
             int64_t delay = elapsed_wall - elapsed_pts;
+            
+            // Delay includes: network latency + decode latency + buffer latency
+            // This is the total end-to-end delay from stream to output
             if (delay < 0) {
               delay_ref_wall_ms_ = wall_ms;
               delay_ref_pts_ms_ = pts_ms;
@@ -687,9 +766,9 @@ void LiveStreamSource::worker_thread_func() {
 
       } else if (pkt->stream_index == demuxer_.audio_stream_index()) {
         total_bytes_audio_.fetch_add(pkt->size);
-        audio_dec_.decode(pkt, audio_queue_);
+        audio_dec_.decode(pkt, *audio_queue_);
         DecodedAudioFrame af;
-        while (audio_queue_.pop(af)) {
+        while (audio_queue_->pop(af)) {
           output_audio_frame(af);
           af.free_buffers();
         }
@@ -697,6 +776,9 @@ void LiveStreamSource::worker_thread_func() {
 
       last_pkt_recv_ms_ = now_ms();
       av_packet_unref(pkt);
+
+      // Periodic buffer monitoring and adjustment
+      monitor_and_adjust_buffer();
 
       // dedicated thread)
 
@@ -730,7 +812,7 @@ void LiveStreamSource::worker_thread_func() {
 void LiveStreamSource::shimmer_thread_func() {
   lss_log_debug("Shimmer thread started");
   while (running_.load()) {
-    if (!first_frame_received_.load()) {
+    if (show_shimmer_ && !first_frame_received_.load()) {
       output_shimmer_frame();
     }
 
@@ -825,10 +907,20 @@ void LiveStreamSource::stop_stream() {
 
   has_pts_offset_ = false;
   pts_to_obs_offset_ns_ = 0;
+  first_video_pts_ns_ = 0;
+  first_audio_pts_ns_ = 0;
   last_video_pts_us_.store(0);
-
+  last_audio_pts_us_.store(0);
+  catching_up_ = false;
+  catchup_first_wall_ms_ = 0;
+  catchup_first_pts_ms_ = 0;
+  pipeline_latency_ms_.store(0);
   has_delay_ref_ = false;
   stream_delay_ms_.store(0);
+
+  // Flush queues to discard stale frames
+  if (video_queue_) video_queue_->flush();
+  if (audio_queue_) audio_queue_->flush();
 
   if (!loading_src_name_.empty())
     toggle_source_visibility(loading_src_name_, false);
@@ -841,6 +933,35 @@ bool LiveStreamSource::try_connect() {
   demuxer_.close();
   video_dec_.close();
   audio_dec_.close();
+
+  // Complete state reset for clean reconnection
+  has_pts_offset_ = false;
+  pts_to_obs_offset_ns_ = 0;
+  first_video_pts_ns_ = 0;
+  first_audio_pts_ns_ = 0;
+  catching_up_ = false;
+  catchup_first_wall_ms_ = 0;
+  catchup_first_pts_ms_ = 0;
+  has_delay_ref_ = false;
+  last_video_pts_us_.store(0);
+  last_audio_pts_us_.store(0);
+  total_bytes_audio_.store(0);
+  total_bytes_video_.store(0);
+  pipeline_latency_ms_.store(0);
+  stream_delay_ms_.store(0);
+  
+  // Flush queues
+  if (video_queue_) {
+    video_queue_->flush();
+  }
+  if (audio_queue_) {
+    audio_queue_->flush();
+  }
+  
+  // Reset auto buffer flag for re-detection
+  if (buffer_preset_ == BufferPreset::Auto) {
+    auto_buffer_adjusted_ = false;
+  }
 
   // before attempting to re-initialize.
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -958,28 +1079,38 @@ void LiveStreamSource::update_source_toggles() {
 
   bool ever_frame = ever_received_frame_.load();
   int attempts = reconnect_mgr_.get_attempts();
+  bool first_frame = first_frame_received_.load();
 
   bool dis_now = false;
   bool loading_now = false;
 
   // 1. We are connected but buffering (no frame yet)
-  // 2. OR we are at the very beginning of the stream and haven't failed too
-  // many times yet (Grace Period)
-  bool buffering = connected && !first_frame_received_.load();
+  bool buffering = connected && !first_frame;
+  
+  // 2. Initial grace period: only at the very beginning (no frames ever received)
   bool initial_connecting = !ever_frame && (attempts <= 2);
 
-  if (buffering || initial_connecting) {
+  lss_log_debug("[TOGGLE] State: connected=%d first_frame=%d ever_frame=%d attempts=%d buffering=%d initial=%d",
+                connected, first_frame, ever_frame, attempts, buffering, initial_connecting);
+
+  if (buffering) {
+    // Connected but waiting for first frame - show loading
+    loading_now = true;
+  } else if (initial_connecting) {
+    // Initial connection attempts - show loading
     loading_now = true;
   } else if (!connected) {
-    dis_now = true; // Permanently show disconnect overlay after grace period
-                    // fails or mid-stream disconnects
+    // Disconnected after receiving frames - show disconnect
+    dis_now = true;
   }
+
+  lss_log_debug("[TOGGLE] Decision: loading_now=%d dis_now=%d", loading_now, dis_now);
 
   bool dis_showing = prev_disconnected_.load();
   if (dis_now != dis_showing) {
-    lss_log_debug("[TOGGLE] Disconnect state changed: connected=%d dis_now=%d "
-                  "dis_showing=%d src='%s'",
-                  connected, dis_now, dis_showing,
+    lss_log_info("[TOGGLE] Disconnect state changed: connected=%d dis_now=%d "
+                  "dis_showing=%d ever_frame=%d attempts=%d src='%s'",
+                  connected, dis_now, dis_showing, ever_frame, attempts,
                   disconnect_src_name_.c_str());
 
     if (dis_now)
@@ -1357,6 +1488,20 @@ bool LiveStreamSource::s_stream_type_modified(obs_properties_t *props,
   return true;
 }
 
+bool LiveStreamSource::s_buffer_preset_modified(obs_properties_t *props,
+                                                obs_property_t *,
+                                                obs_data_t *settings) {
+  int preset = static_cast<int>(obs_data_get_int(settings, PROP_BUFFER_PRESET));
+  bool is_custom = (preset == static_cast<int>(BufferPreset::Custom));
+  
+  obs_property_t *custom_prop = obs_properties_get(props, PROP_BUFFER_CUSTOM);
+  if (custom_prop) {
+    obs_property_set_visible(custom_prop, is_custom);
+  }
+  
+  return true;
+}
+
 const char *LiveStreamSource::s_get_name(void *) {
   return obs_module_text("LiveStreamSource");
 }
@@ -1402,8 +1547,35 @@ obs_properties_t *LiveStreamSource::get_properties(void *data) {
   obs_properties_add_button(props, PROP_REFRESH, obs_module_text("RefreshBtn"),
                             on_refresh_clicked);
   obs_properties_add_bool(props, PROP_HW_DECODE, obs_module_text("HwDecode"));
+  obs_properties_add_bool(props, PROP_SHOW_SHIMMER, obs_module_text("ShowShimmer"));
   obs_properties_add_int(props, PROP_LOW_BITRATE,
                          obs_module_text("LowBitrateThreshold"), 10, 10000, 10);
+
+  // Buffer preset dropdown
+  obs_property_t *buffer_preset = obs_properties_add_list(
+      props, PROP_BUFFER_PRESET, obs_module_text("BufferPreset"),
+      OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+  obs_property_list_add_int(buffer_preset, obs_module_text("BufferAuto"),
+                            static_cast<int>(BufferPreset::Auto));
+  obs_property_list_add_int(buffer_preset, obs_module_text("BufferUltraLowLatency"),
+                            static_cast<int>(BufferPreset::UltraLowLatency));
+  obs_property_list_add_int(buffer_preset, obs_module_text("BufferLowLatency"),
+                            static_cast<int>(BufferPreset::LowLatency));
+  obs_property_list_add_int(buffer_preset, obs_module_text("BufferBalanced"),
+                            static_cast<int>(BufferPreset::Balanced));
+  obs_property_list_add_int(buffer_preset, obs_module_text("BufferStable"),
+                            static_cast<int>(BufferPreset::Stable));
+  obs_property_list_add_int(buffer_preset, obs_module_text("BufferMaxStability"),
+                            static_cast<int>(BufferPreset::MaxStability));
+  obs_property_list_add_int(buffer_preset, obs_module_text("BufferCustom"),
+                            static_cast<int>(BufferPreset::Custom));
+  
+  obs_property_set_modified_callback(buffer_preset, s_buffer_preset_modified);
+  
+  // Custom buffer size (only visible when Custom selected)
+  obs_properties_add_int(props, PROP_BUFFER_CUSTOM,
+                         obs_module_text("CustomBufferFrames"),
+                         BUFFER_SIZE_MIN, BUFFER_SIZE_MAX, 5);
 
   obs_property_t *lb = obs_properties_add_list(
       props, PROP_LOW_BITRATE_SOURCE, obs_module_text("LowBitrateSource"),
@@ -1444,11 +1616,15 @@ void LiveStreamSource::get_defaults(obs_data_t *settings) {
   obs_data_set_default_string(settings, PROP_URL, "rtmp://localhost/live/test");
   obs_data_set_default_int(settings, PROP_STREAM_TYPE,
                            static_cast<int>(StreamType::Standard));
-  obs_data_set_default_int(settings, PROP_LOW_BITRATE, 200);
+  obs_data_set_default_int(settings, PROP_LOW_BITRATE, DEFAULT_LOW_BITRATE_KBPS);
   obs_data_set_default_bool(settings, PROP_AUTO_CATCHUP, true);
   obs_data_set_default_bool(settings, PROP_HW_DECODE, true);
+  obs_data_set_default_bool(settings, PROP_SHOW_SHIMMER, true);
   obs_data_set_default_int(settings, PROP_WHEP_MODE,
                            static_cast<int>(WhepClient::WhepMode::Auto));
+  obs_data_set_default_int(settings, PROP_BUFFER_PRESET,
+                           static_cast<int>(BufferPreset::Auto));
+  obs_data_set_default_int(settings, PROP_BUFFER_CUSTOM, 60);
 }
 
 //
@@ -1885,6 +2061,282 @@ void register_live_stream_source() {
   live_stream_source_info.get_defaults = LiveStreamSource::get_defaults;
 
   obs_register_source(&live_stream_source_info);
+}
+
+//
+// Buffer Calculation Methods
+//
+
+int LiveStreamSource::calculate_buffer_size() const {
+  if (buffer_preset_ == BufferPreset::Custom) {
+    return custom_buffer_frames_;
+  } else if (buffer_preset_ == BufferPreset::Auto) {
+    return calculate_smart_auto_buffer();
+  } else {
+    return calculate_preset_buffer(buffer_preset_);
+  }
+}
+
+int LiveStreamSource::calculate_frames_for_duration(double fps, int target_ms) const {
+  if (fps < 5.0) fps = 30.0;  // Fallback
+  double frames = (fps * target_ms) / 1000.0;
+  return static_cast<int>(std::ceil(frames));
+}
+
+int LiveStreamSource::get_preset_target_ms(BufferPreset preset) const {
+  switch (preset) {
+    case BufferPreset::UltraLowLatency:
+      return BUFFER_ULTRA_LOW_LATENCY_MS;
+    case BufferPreset::LowLatency:
+      return BUFFER_LOW_LATENCY_MS;
+    case BufferPreset::Balanced:
+      return BUFFER_BALANCED_MS;
+    case BufferPreset::Stable:
+      return BUFFER_STABLE_MS;
+    case BufferPreset::MaxStability:
+      return BUFFER_MAX_STABILITY_MS;
+    default:
+      return BUFFER_STABLE_MS;
+  }
+}
+
+double LiveStreamSource::get_bitrate_multiplier() const {
+  double kbps = bitrate_mon_.current_kbps();
+  
+  // If bitrate not yet known, assume high bitrate (safe default)
+  if (kbps < 100.0) {
+    return 1.3;  // Assume high bitrate for initial buffer
+  }
+  
+  if (kbps >= BITRATE_ULTRA_HIGH) {
+    return 1.5;
+  } else if (kbps >= BITRATE_HIGH) {
+    return 1.3;
+  } else if (kbps >= BITRATE_MEDIUM_HIGH) {
+    return 1.1;
+  } else if (kbps >= BITRATE_MEDIUM) {
+    return 1.0;
+  } else if (kbps >= BITRATE_LOW) {
+    return 0.9;
+  } else {
+    return 0.8;
+  }
+}
+
+double LiveStreamSource::get_resolution_multiplier() const {
+  int w = width_.load();
+  int h = height_.load();
+  int pixels = w * h;
+  
+  // If resolution not yet known, assume 1080p (safe default)
+  if (pixels == 0) {
+    return 1.2;  // Assume 1080p for initial buffer
+  }
+  
+  if (pixels >= 3840 * 2160) {
+    return 1.5;  // 4K
+  } else if (pixels >= 2560 * 1440) {
+    return 1.3;  // 1440p
+  } else if (pixels >= 1920 * 1080) {
+    return 1.2;  // 1080p
+  } else if (pixels >= 1280 * 720) {
+    return 1.0;  // 720p (baseline)
+  } else if (pixels >= 854 * 480) {
+    return 0.8;  // 480p
+  } else {
+    return 0.7;  // <480p
+  }
+}
+
+double LiveStreamSource::get_stability_multiplier() const {
+  int64_t recent_drops = total_frames_dropped_.load() - last_drop_count_;
+  int64_t recent_decoded = total_frames_decoded_.load() - last_decoded_count_;
+  
+  if (recent_decoded < 100) {
+    return 1.0;  // Not enough data yet
+  }
+  
+  double drop_rate = static_cast<double>(recent_drops) / recent_decoded;
+  
+  if (drop_rate > 0.05) {
+    return 1.5;  // >5% drops: very bad network
+  } else if (drop_rate > 0.02) {
+    return 1.3;  // 2-5% drops: bad network
+  } else if (drop_rate > 0.01) {
+    return 1.1;  // 1-2% drops: mediocre network
+  } else {
+    return 1.0;  // <1% drops: good network
+  }
+}
+
+int LiveStreamSource::calculate_preset_buffer(BufferPreset preset) const {
+  // Get target duration
+  int target_ms = get_preset_target_ms(preset);
+  
+  // Get current FPS
+  double fps = current_fps_.load();
+  if (fps < 5.0) fps = 30.0;  // Fallback
+  
+  // Calculate base frames for target duration
+  int base_frames = calculate_frames_for_duration(fps, target_ms);
+  
+  // Apply smart multipliers
+  double bitrate_mult = get_bitrate_multiplier();
+  double resolution_mult = get_resolution_multiplier();
+  double stability_mult = get_stability_multiplier();
+  
+  // Calculate final buffer
+  double adjusted = base_frames * bitrate_mult * resolution_mult * stability_mult;
+  int final_frames = static_cast<int>(std::round(adjusted));
+  
+  // Clamp to limits
+  return std::clamp(final_frames, BUFFER_SIZE_MIN, BUFFER_SIZE_MAX);
+}
+
+int LiveStreamSource::calculate_smart_auto_buffer() const {
+  double fps = current_fps_.load();
+  
+  // Use higher fallback for initial buffer calculation
+  // This ensures sufficient buffer for high FPS streams (60fps) before FPS is detected
+  if (fps < 5.0) {
+    // Check resolution to guess FPS
+    int w = width_.load();
+    int h = height_.load();
+    
+    // If resolution not yet known, assume HD 60fps (safe default for modern streams)
+    if (w == 0 || h == 0) {
+      fps = 60.0;  // Safe default for initial buffer
+    }
+    // HD/FHD streams are likely 60fps, SD streams likely 30fps
+    else if (w >= 1280 && h >= 720) {
+      fps = 60.0;  // Assume 60fps for HD+ streams
+    } else {
+      fps = 30.0;  // Assume 30fps for SD streams
+    }
+  }
+  
+  // Round FPS to nearest tier for stable buffer sizing
+  // This prevents constant buffer resizing as FPS fluctuates
+  static const int tiers[] = {20, 25, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120};
+  static const int tier_count = sizeof(tiers) / sizeof(tiers[0]);
+  
+  int rounded_fps = tiers[0];  // Default to lowest tier
+  double min_diff = std::abs(fps - tiers[0]);
+  
+  // Find nearest tier
+  for (int i = 1; i < tier_count; i++) {
+    double diff = std::abs(fps - tiers[i]);
+    if (diff < min_diff) {
+      min_diff = diff;
+      rounded_fps = tiers[i];
+    }
+  }
+  
+  // Apply multipliers
+  double bitrate_mult = get_bitrate_multiplier();
+  double resolution_mult = get_resolution_multiplier();
+  double stability_mult = get_stability_multiplier();
+  
+  double adjusted = rounded_fps * bitrate_mult * resolution_mult * stability_mult;
+  int final_frames = static_cast<int>(std::round(adjusted));
+  int clamped = std::clamp(final_frames, BUFFER_SIZE_MIN, BUFFER_SIZE_MAX);
+  
+  // Log calculation details
+  lss_log_info("Auto buffer calculation: FPS=%.1f→%d, bitrate_mult=%.2f, res_mult=%.2f, stab_mult=%.2f → %d frames (clamped: %d)",
+               fps, rounded_fps, bitrate_mult, resolution_mult, stability_mult, final_frames, clamped);
+  
+  return clamped;
+}
+
+void LiveStreamSource::recreate_frame_queues(int new_capacity) {
+  // CRITICAL: This function CANNOT be called from worker thread
+  // It would cause deadlock (thread trying to join itself)
+  // This should only be called from settings update or initialization
+  
+  bool was_running = running_.load();
+  
+  if (was_running) {
+    // Pause temporarily
+    running_.store(false);
+    if (worker_thread_.joinable()) {
+      worker_thread_.join();
+    }
+  }
+  
+  // Flush old queues
+  if (video_queue_) {
+    video_queue_->flush();
+  }
+  if (audio_queue_) {
+    audio_queue_->flush();
+  }
+  
+  // Create video queue
+  video_queue_ = std::make_unique<VideoFrameQueue>(new_capacity);
+  
+  // Create audio queue with SAME DURATION but different frame count
+  // Audio frame rate is different from video frame rate!
+  // Video: 60 fps, Audio: ~43 fps (44100 Hz / 1024 samples per frame)
+  double fps = current_fps_.load();
+  if (fps < 5.0) fps = 60.0;  // Fallback
+  
+  double target_duration_sec = new_capacity / fps;
+  
+  // Audio frame rate approximation
+  // Most streams: 44100 Hz or 48000 Hz, 1024 samples/frame
+  // 44100 / 1024 = ~43 fps
+  // 48000 / 1024 = ~47 fps
+  int audio_fps = 45;  // Conservative middle ground
+  int audio_capacity = static_cast<int>(audio_fps * target_duration_sec);
+  audio_capacity = std::clamp(audio_capacity, BUFFER_SIZE_MIN, BUFFER_SIZE_MAX);
+  
+  audio_queue_ = std::make_unique<AudioFrameQueue>(audio_capacity);
+  
+  lss_log_info("Frame buffer resized: video=%d frames, audio=%d frames (%.2f sec duration)",
+               new_capacity, audio_capacity, target_duration_sec);
+  
+  // Restart if was running
+  if (was_running) {
+    running_.store(true);
+    worker_thread_ = std::thread(&LiveStreamSource::worker_thread_func, this);
+  }
+}
+
+void LiveStreamSource::monitor_and_adjust_buffer() {
+  int64_t now = now_ms();
+  
+  // Check every 10 seconds
+  if (now - last_buffer_check_ms_ < BUFFER_MONITOR_INTERVAL_MS) {
+    return;
+  }
+  
+  last_buffer_check_ms_ = now;
+  
+  // Update drop counters for stability calculation
+  last_drop_count_ = total_frames_dropped_.load();
+  last_decoded_count_ = total_frames_decoded_.load();
+  
+  // Only adjust in Auto mode
+  if (buffer_preset_ != BufferPreset::Auto) {
+    return;
+  }
+  
+  // Calculate new optimal buffer
+  int new_optimal = calculate_buffer_size();
+  int current = video_queue_ ? video_queue_->capacity() : FRAME_QUEUE_CAPACITY;
+  
+  // Only adjust if difference is significant (>20%)
+  double diff_percent = std::abs(new_optimal - current) / static_cast<double>(current);
+  
+  if (diff_percent > BUFFER_ADJUST_THRESHOLD) {
+    lss_log_info("Auto buffer: Would adjust %d → %d frames (%.0f%% change) - dynamic resize disabled to prevent deadlock",
+                 current, new_optimal, diff_percent * 100);
+    // NOTE: Dynamic buffer resizing from worker thread causes deadlock
+    // recreate_frame_queues() tries to join the worker thread from within itself
+    // Solution: Buffer size is set at initialization and can only be changed via settings
+    // This is actually safer - no mid-stream disruptions
+    auto_buffer_adjusted_ = true;
+  }
 }
 
 } // namespace lss

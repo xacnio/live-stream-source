@@ -83,9 +83,24 @@ private:
   static bool s_stream_type_modified(obs_properties_t *props,
                                      obs_property_t *prop,
                                      obs_data_t *settings);
+  static bool s_buffer_preset_modified(obs_properties_t *props,
+                                       obs_property_t *prop,
+                                       obs_data_t *settings);
 
   static void populate_source_list(obs_property_t *list,
                                    obs_source_t *self_source);
+
+  // Buffer calculation methods
+  int calculate_buffer_size() const;
+  int calculate_preset_buffer(BufferPreset preset) const;
+  int calculate_smart_auto_buffer() const;
+  int calculate_frames_for_duration(double fps, int target_ms) const;
+  int get_preset_target_ms(BufferPreset preset) const;
+  double get_bitrate_multiplier() const;
+  double get_resolution_multiplier() const;
+  double get_stability_multiplier() const;
+  void recreate_frame_queues(int new_capacity);
+  void monitor_and_adjust_buffer();
 
   obs_source_t *obs_source_ = nullptr;
 
@@ -94,7 +109,10 @@ private:
   int low_bitrate_kbps_ = DEFAULT_LOW_BITRATE_KBPS;
   bool auto_catchup_ = true;
   bool hw_decode_ = false;
+  bool show_shimmer_ = true;
   StreamType stream_type_ = StreamType::Standard;
+  BufferPreset buffer_preset_ = BufferPreset::Auto;
+  int custom_buffer_frames_ = 60;
   std::string low_bitrate_src_name_;
   std::string disconnect_src_name_;
   std::string loading_src_name_;
@@ -104,7 +122,8 @@ private:
   StreamDemuxer demuxer_;
   VideoDecoder video_dec_;
   AudioDecoder audio_dec_;
-  AudioFrameQueue audio_queue_{FRAME_QUEUE_CAPACITY};
+  std::unique_ptr<VideoFrameQueue> video_queue_;
+  std::unique_ptr<AudioFrameQueue> audio_queue_;
   BitrateMonitor bitrate_mon_;
   CatchupController catchup_;
   ReconnectManager reconnect_mgr_;
@@ -152,6 +171,8 @@ private:
 
   int64_t pts_to_obs_offset_ns_ = 0;
   bool has_pts_offset_ = false;
+  int64_t first_video_pts_ns_ = 0;
+  int64_t first_audio_pts_ns_ = 0;
 
   bool catching_up_ = false;
   int64_t catchup_first_wall_ms_ = 0;
@@ -185,6 +206,12 @@ private:
       0}; // For timeout-based disconnect detection
   std::atomic<int64_t> whep_last_video_packet_ms_{
       0}; // For detecting audio-only mode
+  
+  // Buffer management
+  bool auto_buffer_adjusted_ = false;
+  int64_t last_buffer_check_ms_ = 0;
+  int64_t last_drop_count_ = 0;
+  int64_t last_decoded_count_ = 0;
 };
 
 extern struct obs_source_info live_stream_source_info;

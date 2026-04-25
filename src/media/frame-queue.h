@@ -38,6 +38,7 @@ public:
   bool peek(Frame &out) const;
   void flush();
   int size() const;
+  int capacity() const { return capacity_; }
   bool empty() const;
 
 private:

@@ -59,30 +59,52 @@ inline int64_t now_us() {
 //  Default configuration values
 namespace lss {
 
-// Frame queue capacity: enough for 60fps without drops
-constexpr int FRAME_QUEUE_CAPACITY = 5;
+// Frame queue capacity: default initial buffer
+constexpr int FRAME_QUEUE_CAPACITY = 60;
 
-// Probesize: 32 KB  - absolute minimum to detect headers
-constexpr int64_t PROBE_SIZE = 32768;
+// Buffer size limits
+constexpr int BUFFER_SIZE_MIN = 5;
+constexpr int BUFFER_SIZE_MAX = 180;
 
-// Analyze duration: 500 ms max  - we want to start playing ASAP
-constexpr int64_t ANALYZE_DURATION_US = 500000;
+// Buffer preset target durations (milliseconds)
+constexpr int BUFFER_ULTRA_LOW_LATENCY_MS = 150;
+constexpr int BUFFER_LOW_LATENCY_MS = 300;
+constexpr int BUFFER_BALANCED_MS = 700;
+constexpr int BUFFER_STABLE_MS = 1200;
+constexpr int BUFFER_MAX_STABILITY_MS = 2000;
 
-// Default low-bitrate threshold in kbps
-constexpr int DEFAULT_LOW_BITRATE_KBPS = 200;
+// Buffer monitoring interval
+constexpr int64_t BUFFER_MONITOR_INTERVAL_MS = 10000;  // 10 seconds
+constexpr double BUFFER_ADJUST_THRESHOLD = 0.2;  // 20% change triggers adjustment
 
-// Bitrate sampling window in milliseconds
-constexpr int BITRATE_WINDOW_MS = 2000;
+// Bitrate thresholds for smart buffer calculation (kbps)
+constexpr double BITRATE_ULTRA_HIGH = 15000;
+constexpr double BITRATE_HIGH = 8000;
+constexpr double BITRATE_MEDIUM_HIGH = 4000;
+constexpr double BITRATE_MEDIUM = 2000;
+constexpr double BITRATE_LOW = 1000;
 
-// Maximum A/V drift (ms) before catch-up engages
-constexpr int64_t CATCHUP_DRIFT_THRESHOLD_MS = 150;
+// Probesize: 512 KB - larger for high bitrate streams
+constexpr int64_t PROBE_SIZE = 524288;
+
+// Analyze duration: 1000 ms - better codec detection
+constexpr int64_t ANALYZE_DURATION_US = 1000000;
+
+// Default low-bitrate threshold in kbps (optimized for high quality streams)
+constexpr int DEFAULT_LOW_BITRATE_KBPS = 5000;
+
+// Bitrate sampling window in milliseconds (longer for stability)
+constexpr int BITRATE_WINDOW_MS = 3000;
+
+// Maximum A/V drift (ms) before catch-up engages (relaxed for 60fps)
+constexpr int64_t CATCHUP_DRIFT_THRESHOLD_MS = 200;
 
 // Maximum A/V drift (ms) to exit catch-up
-constexpr int64_t CATCHUP_STABLE_THRESHOLD_MS = 50;
+constexpr int64_t CATCHUP_STABLE_THRESHOLD_MS = 80;
 
-// Catch-up playback speed range
-constexpr double CATCHUP_SPEED_MIN = 1.05;
-constexpr double CATCHUP_SPEED_MAX = 1.15;
+// Catch-up playback speed range (gentler for 60fps smoothness)
+constexpr double CATCHUP_SPEED_MIN = 1.03;
+constexpr double CATCHUP_SPEED_MAX = 1.10;
 
 // Reconnection
 constexpr int RECONNECT_DELAY_MS = 2000;
@@ -108,15 +130,29 @@ enum class StreamType : int {
   WHEP = 3,      // WebRTC via WHEP endpoint
 };
 
+// Buffer preset enum
+enum class BufferPreset : int {
+  Auto = 0,           // Smart multi-factor optimization
+  UltraLowLatency = 1,
+  LowLatency = 2,
+  Balanced = 3,
+  Stable = 4,
+  MaxStability = 5,
+  Custom = 6
+};
+
 // Properties keys
 constexpr const char *PROP_URL = "url";
 constexpr const char *PROP_STREAM_TYPE = "stream_type";
 constexpr const char *PROP_LOW_BITRATE = "low_bitrate_kbps";
 constexpr const char *PROP_AUTO_CATCHUP = "auto_catchup";
 constexpr const char *PROP_HW_DECODE = "hw_decode";
+constexpr const char *PROP_BUFFER_PRESET = "buffer_preset";
+constexpr const char *PROP_BUFFER_CUSTOM = "buffer_custom_frames";
 constexpr const char *PROP_LOW_BITRATE_SOURCE = "low_bitrate_source_name";
 constexpr const char *PROP_DISCONNECT_SOURCE = "disconnect_source_name";
 constexpr const char *PROP_LOADING_SOURCE = "loading_source_name";
+constexpr const char *PROP_SHOW_SHIMMER = "show_shimmer";
 constexpr const char *PROP_STATS_PATH_INFO = "stats_path_info";
 constexpr const char *PROP_OPEN_STATS = "open_stats";
 constexpr const char *PROP_ADD_OVERLAY_HORZ = "add_stats_overlay_horz";

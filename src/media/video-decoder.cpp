@@ -135,6 +135,10 @@ int VideoDecoder::init(const AVCodecParameters *par, bool hw_accel) {
   codec_ctx_->flags |= AV_CODEC_FLAG_LOW_DELAY;
   codec_ctx_->flags2 |= AV_CODEC_FLAG2_FAST;
 
+  // Error concealment for corrupted streams
+  codec_ctx_->error_concealment = FF_EC_GUESS_MVS | FF_EC_DEBLOCK;
+  codec_ctx_->err_recognition = AV_EF_CAREFUL;
+
   // Single-thread decode to avoid crashes during resolution changes
   codec_ctx_->thread_count = 1;
 
