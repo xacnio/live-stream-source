@@ -113,10 +113,15 @@ jobs:
           cp build/Release/*live-stream-source*.dll package/obs-plugins/live-stream-source/bin/64bit/live-stream-source.dll
           cp build/Release/*live-stream-source*.pdb package/obs-plugins/live-stream-source/bin/64bit/live-stream-source.pdb || true
           
-          # Copy datachannel.dll (WebRTC dependency)
-          echo "Copying datachannel.dll for WHEP support..."
-          cp C:/obs-deps/bin/datachannel.dll package/obs-plugins/live-stream-source/bin/64bit/ 2>/dev/null || \
-          echo "Warning: datachannel.dll not found"
+          # Copy OpenSSL DLLs (required for libdatachannel/WebRTC)
+          echo "Copying OpenSSL DLLs..."
+          cp C:/hostedtoolcache/windows/Ruby/3.3.11/x64/bin/ruby_builtin_dlls/libcrypto-3-x64.dll package/obs-plugins/live-stream-source/bin/64bit/ || \
+          cp C:/hostedtoolcache/windows/Ruby/*/x64/bin/ruby_builtin_dlls/libcrypto-3-x64.dll package/obs-plugins/live-stream-source/bin/64bit/ || \
+          echo "ERROR: libcrypto-3-x64.dll not found"
+          
+          cp C:/hostedtoolcache/windows/Ruby/3.3.11/x64/bin/ruby_builtin_dlls/libssl-3-x64.dll package/obs-plugins/live-stream-source/bin/64bit/ || \
+          cp C:/hostedtoolcache/windows/Ruby/*/x64/bin/ruby_builtin_dlls/libssl-3-x64.dll package/obs-plugins/live-stream-source/bin/64bit/ || \
+          echo "ERROR: libssl-3-x64.dll not found"
           
           cp -r data/locale/* package/data/obs-plugins/live-stream-source/locale/
 
