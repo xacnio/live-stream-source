@@ -84,6 +84,12 @@ jobs:
           echo ""
           echo "=== Checking build/Release ==="
           ls -la build/Release/*.dll 2>/dev/null || echo "No DLLs found in build/Release"
+          echo ""
+          echo "=== Searching for OpenSSL/mbedTLS DLLs ==="
+          find C:/ -name "libcrypto*.dll" -o -name "libssl*.dll" -o -name "mbedtls*.dll" 2>/dev/null | head -20 || echo "No SSL DLLs found"
+          echo ""
+          echo "=== Checking if plugin has external dependencies ==="
+          ldd build/Release/live-stream-source.dll 2>/dev/null || dumpbin //dependents build/Release/live-stream-source.dll 2>/dev/null || echo "Cannot check dependencies"
 
       - name: Build Windows Installer
         if: runner.os == 'Windows'
@@ -107,18 +113,10 @@ jobs:
           cp build/Release/*live-stream-source*.dll package/obs-plugins/live-stream-source/bin/64bit/live-stream-source.dll
           cp build/Release/*live-stream-source*.pdb package/obs-plugins/live-stream-source/bin/64bit/live-stream-source.pdb || true
           
-          # Copy OpenSSL DLLs if they exist
-          echo "Searching for OpenSSL DLLs..."
-          find C:/obs-deps -name "libcrypto*.dll" -o -name "libssl*.dll" || echo "OpenSSL DLLs not found in obs-deps"
-          
-          # Try common locations
-          cp C:/obs-deps/bin/libcrypto-3-x64.dll package/obs-plugins/live-stream-source/bin/64bit/ 2>/dev/null || \
-          cp C:/obs-deps/bin/libcrypto*.dll package/obs-plugins/live-stream-source/bin/64bit/ 2>/dev/null || \
-          echo "Warning: libcrypto DLL not found"
-          
-          cp C:/obs-deps/bin/libssl-3-x64.dll package/obs-plugins/live-stream-source/bin/64bit/ 2>/dev/null || \
-          cp C:/obs-deps/bin/libssl*.dll package/obs-plugins/live-stream-source/bin/64bit/ 2>/dev/null || \
-          echo "Warning: libssl DLL not found"
+          # Copy datachannel.dll (WebRTC dependency)
+          echo "Copying datachannel.dll for WHEP support..."
+          cp C:/obs-deps/bin/datachannel.dll package/obs-plugins/live-stream-source/bin/64bit/ 2>/dev/null || \
+          echo "Warning: datachannel.dll not found"
           
           cp -r data/locale/* package/data/obs-plugins/live-stream-source/locale/
 
