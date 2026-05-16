@@ -72,8 +72,6 @@ int VideoDecoder::init_hw_decoder(const AVCodec *codec,
     }
 
     codec_ctx_->hw_device_ctx = av_buffer_ref(hw_device_ctx_);
-    codec_ctx_->flags |= AV_CODEC_FLAG_LOW_DELAY;
-    codec_ctx_->flags2 |= AV_CODEC_FLAG2_FAST;
     codec_ctx_->thread_count = 1;
     codec_ctx_->opaque = &hw_pix_fmt_;
     codec_ctx_->get_format = get_hw_format;
@@ -132,15 +130,25 @@ int VideoDecoder::init(const AVCodecParameters *par, bool hw_accel) {
     return ret;
   }
 
-  codec_ctx_->flags |= AV_CODEC_FLAG_LOW_DELAY;
-  codec_ctx_->flags2 |= AV_CODEC_FLAG2_FAST;
+  // Do NOT use AV_CODEC_FLAG_LOW_DELAY here! 
+  // If the stream contains B-frames, LOW_DELAY forces the decoder to output 
+  // frames in decode order (DTS) instead of presentation order (PTS), 
+  // causing severe visual merging and stuttering during motion.
+  // codec_ctx_->flags |= AV_CODEC_FLAG_LOW_DELAY;
+  // codec_ctx_->flags2 |= AV_CODEC_FLAG2_FAST;
 
-  // Error concealment for corrupted streams
+  // Standard error concealment for live streams
+  // Removed FF_EC_GUESS_MVS: Guessing motion vectors on a scene change 
+  // causes severe vertical stretching/smearing. Without it, the corrupt 
+  // areas will just stay static (copy from old frame) until the next I-frame.
   codec_ctx_->error_concealment = FF_EC_GUESS_MVS | FF_EC_DEBLOCK;
-  codec_ctx_->err_recognition = AV_EF_CAREFUL;
+  codec_ctx_->err_recognition = AV_EF_IGNORE_ERR;
 
-  // Single-thread decode to avoid crashes during resolution changes
-  codec_ctx_->thread_count = 1;
+  // Frame-level threading: highly stable, decodes multiple frames in parallel.
+  // Slice threading is notorious for causing pixelation and tearing on
+  // streams that don't have properly aligned slices. 0 = auto threads.
+  codec_ctx_->thread_count = 0;
+  codec_ctx_->thread_type = FF_THREAD_FRAME;
 
   ret = avcodec_open2(codec_ctx_, codec, nullptr);
   if (ret < 0) {

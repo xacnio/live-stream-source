@@ -78,6 +78,14 @@ ui_*.h
 ehthumbs.db
 Thumbs.db
 
+# Build dirs
+build_test*/
+build-test*/
+
+# AI assistant local state
+.kiro/
+.claude/
+
 # Others
 thirdparty/
 .agent/

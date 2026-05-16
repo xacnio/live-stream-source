@@ -15,7 +15,7 @@ MODULE_EXPORT const char *obs_module_description(void) {
 bool obs_module_load(void) {
   lss::init_plugin_settings(); // Register Tools menu & Load Config
   lss::register_live_stream_source();
-  blog(LOG_INFO, "[LSS] Plugin loaded (v%d.%d.%d)", 1, 0, 0);
+  blog(LOG_INFO, "[LSS] Plugin loaded (v" PLUGIN_VERSION ")");
   return true;
 }
 

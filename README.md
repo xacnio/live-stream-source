@@ -1,6 +1,6 @@
 # Live Stream Source
 
-Play live streams (RTMP, FLV, SRT, HLS, IVS, WHEP) directly in OBS Studio. Built for low latency and stability, it's a solid choice for restreaming IRL sessions or complex setups.
+Play live streams (RTMP, FLV, SRT, HLS, IVS, WHEP) directly in OBS Studio. Built for low latency and stability.
 
 > ⚠️ Please read [Disclaimer](#disclaimer) and [AI Disclosure](#ai-disclosure) first.
 
@@ -13,13 +13,13 @@ Play live streams (RTMP, FLV, SRT, HLS, IVS, WHEP) directly in OBS Studio. Built
 
 ## Features
 
-- **Protocol Flexibility** — Support for RTMP, RTMPS, SRT, HLS, IVS (LL-HLS), and WHEP.
-- **Hardware Acceleration** — Efficient decoding with NVDEC, QSV, DXVA2, and VideoToolbox.
-- **Low Latency** — Tuned for minimum delay and smooth audio/video syncing.
-- **Built-in Reliability** — Configurable auto-reconnect for unstable connections.
-- **Real-time Metrics** — Monitor bitrate, FPS, latency, and uptime on the fly.
-- **Smart Fallbacks** — Switch to another source or overlay when the stream drops or buffers.
-- **Multiple Dashboards** — View stats via a built-in window, a browser overlay, or a custom WebSocket feed.
+- **Protocol Flexibility** — RTMP, RTMPS, SRT, HLS, IVS (LL-HLS), and WHEP.
+- **Hardware Acceleration** — NVDEC, QSV, DXVA2, and VideoToolbox.
+- **Catch-up Playback** — SoundTouch time-stretching keeps audio artifact-free when recovering from network drops. Triggers at 1 s drift, skips to live edge above 10 s.
+- **Auto-Reconnect** — Configurable retry on connection failure.
+- **Smart Fallbacks** — Switch to another OBS source on disconnect, low bitrate, or during initial buffering.
+- **Real-time Metrics** — Bitrate, FPS, latency, and uptime via a browser dashboard, a Qt stats window, or a raw WebSocket feed.
+- **Live Preview Dashboard** — Low-bandwidth JPEG+PCM preview in the browser tab with remote mute, blur, and skip-to-live controls.
 
 ## Supported Protocols
 
@@ -28,7 +28,7 @@ Play live streams (RTMP, FLV, SRT, HLS, IVS, WHEP) directly in OBS Studio. Built
 | **Standard** | RTMP, RTMPS, SRT, RTSP | Via FFmpeg demuxer |
 | **Amazon IVS** | LL-HLS | Custom low-latency HLS client |
 | **HLS** | Standard HLS | Via FFmpeg |
-| **WHEP** | WebRTC | Via libdatachannel, supports video+audio/video-only/audio-only |
+| **WHEP** | WebRTC | Via libdatachannel |
 
 ## Installation
 
@@ -37,44 +37,34 @@ Download the latest release for your platform from [Releases](https://github.com
 ### Windows
 
 **Installer (Recommended):**
-1. Get the latest `live-stream-source-*-windows-installer.exe`.
-2. Run it and you're done.
+1. Get `live-stream-source-*-windows-installer.exe` and run it.
 
-**Manual Setup:**
+**Manual:**
 1. Download `live-stream-source-*-windows-x64.zip`.
-2. Unzip it to your OBS folder (typically `C:\Program Files\obs-studio\`).
-3. Restart OBS Studio.
+2. Unzip to your OBS folder (`C:\Program Files\obs-studio\`).
+3. Restart OBS.
 
 ### macOS
 
 **Installer (PKG):**
-1. Download `live-stream-source-*-macos-installer.zip`.
-2. Run the `.pkg` file.
-3. Restart OBS.
+1. Download `live-stream-source-*-macos-installer.zip` and run the `.pkg`.
+2. Restart OBS.
 
-> **Heads up:** The package is unsigned. If macOS blocks it, just head to **System Settings → Privacy & Security** and hit **Open Anyway**.
+> **Note:** The package is unsigned. If macOS blocks it, go to **System Settings → Privacy & Security → Open Anyway**.
 
-**Manual Setup:**
-1. Grab `live-stream-source-*-macos-universal.zip`.
-2. Drop the `live-stream-source.plugin` folder into:
-   ```
-   ~/Library/Application Support/obs-studio/plugins/
-   ```
+**Manual:**
+1. Download `live-stream-source-*-macos-universal.zip`.
+2. Drop `live-stream-source.plugin` into `~/Library/Application Support/obs-studio/plugins/`.
 3. Restart OBS.
 
 ### Linux
+
 1. Download `live-stream-source-*-x86_64-linux-gnu.zip`.
-2. Extract the ZIP file to `~/.config/obs-studio/plugins/`.
-3. Restart OBS Studio
+2. Extract to `~/.config/obs-studio/plugins/`.
+3. Restart OBS.
 
-> **Note:** If OBS Studio is installed as a Flatpak or Snap package, the plugin path may be different.
-```bash
-# Flatpak
-~/.var/app/org.obsproject.Studio/config/obs-studio/plugins/
-
-# Snap
-~/snap/obs-studio/current/.config/obs-studio/plugins/
-```
+> Flatpak: `~/.var/app/org.obsproject.Studio/config/obs-studio/plugins/`  
+> Snap: `~/snap/obs-studio/current/.config/obs-studio/plugins/`
 
 ## Usage
 
@@ -91,48 +81,87 @@ Download the latest release for your platform from [Releases](https://github.com
 
 | Setting | Description |
 |---------|-------------|
-| **Stream URL** | The URL to the live stream |
+| **Stream URL** | URL to the live stream |
 | **Stream Type** | Standard, Amazon IVS, HLS, or WHEP |
 | **Hardware Acceleration** | Enable GPU decoding |
 | **Low Bitrate Threshold** | Bitrate (kbps) below which the low-bitrate source is shown |
-| **Low Bitrate Overlay Source** | Source to show when bitrate drops below threshold |
-| **Disconnect Fallback Source** | Source to show when the stream disconnects |
-| **Loading Overlay Source** | Source to show during initial connection |
-| **WHEP Bearer Token** | Authentication token for WHEP endpoints |
+| **Low Bitrate Overlay Source** | Source shown when bitrate drops below threshold |
+| **Disconnect Fallback Source** | Source shown when stream disconnects |
+| **Loading Overlay Source** | Source shown during initial connection |
+| **WHEP Bearer Token** | Auth token for WHEP endpoints |
 
 ### Buttons
 
 | Button | Action |
 |--------|--------|
 | **Refresh** | Reconnect to the stream |
+| **Skip to Live Edge** | Re-anchor immediately to the live edge |
 | **Open Statistics Dashboard** | Opens the HTML stats dashboard in a browser |
 | **Show Statistics Window** | Opens the built-in Qt stats window |
 | **Add Stats Overlay** | Adds a browser source overlay to the current scene |
 
 ## WebSocket Stats Server
 
-The plugin runs a WebSocket server (default port `4477`) that broadcasts JSON stats for all active sources. Configure the port and network interface from **Tools → Live Stream Source Dashboard → Settings**.
+The plugin runs a WebSocket server on port `4477` (configurable via **Tools → Live Stream Source Dashboard → Settings**) that broadcasts JSON stats and accepts JSON commands.
 
-### JSON Format
+### JSON Stats Format
 
 ```json
 {
   "sources": {
     "Source Name": {
       "connected": true,
-      "kbps": 4500,
-      "fps": 30.0,
       "width": 1920,
       "height": 1080,
+      "kbps": 4500,
+      "fps": 30.0,
       "latency_ms": 120,
-      "stream_delay_ms": 1800,
+      "total_decoded": 18000,
       "dropped_frames": 0,
+      "dropped_decode": 0,
+      "dropped_latency": 0,
+      "total_bytes_video": 524288000,
+      "total_bytes_audio": 10485760,
+      "reconnects": 0,
+      "catchup_active": false,
+      "catchup_state": "Normal",
+      "catchup_tempo": 1.000,
+      "catchup_drift_ms": 0,
       "hw_accel": true,
-      "uptime_seconds": 3600
+      "video_codec": "h264",
+      "audio_codec": "aac",
+      "stream_delay_ms": 1800,
+      "uptime_s": 3600
     }
   }
 }
 ```
+
+### Binary Preview Protocol
+
+When preview is enabled, binary frames are sent alongside JSON stats. The first byte is a type tag:
+
+| Tag | Type | Format |
+|-----|------|--------|
+| `0x01` | Video frame | JPEG (854×480, ~10 fps) |
+| `0x02` | Audio chunk | Float32 mono PCM, 16 kHz |
+
+### Remote Commands
+
+Send a JSON object to control a source:
+
+```json
+{ "command": "blur", "source": "My Stream Source" }
+```
+
+| Command | Effect |
+|---------|--------|
+| `preview_video_on` / `preview_video_off` | Start / stop JPEG video frames |
+| `preview_audio_on` / `preview_audio_off` | Start / stop PCM audio chunks |
+| `mute` / `unmute` | Toggle mute overlay on the preview |
+| `blur` / `unblur` | Toggle privacy blur on the preview |
+| `live_to_edge` | Skip to the live edge immediately |
+| `refresh` | Reconnect the stream |
 
 ## Building from Source
 
@@ -141,14 +170,18 @@ The plugin runs a WebSocket server (default port `4477`) that broadcasts JSON st
 - CMake 3.16+
 - C++17 compiler
 - OBS Studio source/SDK
-- FFmpeg development libraries [FFMPEG-Builds](https://github.com/btbn/ffmpeg-builds/releases)
+- FFmpeg dev libraries ([ffmpeg-builds](https://github.com/btbn/ffmpeg-builds/releases))
 - Qt6 (Widgets, Core, Network)
-- libdatachannel (fetched automatically for WHEP support)
+- SoundTouch, libdatachannel, MbedTLS — fetched automatically via CMake FetchContent
 
-### Build (Windows)
+### Build
 
 ```bash
-cmake -B build -DOBS_SOURCE_DIR="path/to/obs-studio" -DOBS_BIN_DIR="path/to/obs-studio/bin/64bit" -DFFMPEG_DIR="path/to/ffmpeg"
+cmake -B build \
+  -DOBS_SOURCE_DIR="path/to/obs-studio" \
+  -DOBS_BIN_DIR="path/to/obs-studio/bin/64bit" \
+  -DFFMPEG_DIR="path/to/ffmpeg" \
+  -DENABLE_WHEP=ON
 cmake --build build --config Release
 ```
 
@@ -156,7 +189,7 @@ cmake --build build --config Release
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `ENABLE_WHEP` | `ON` | Enable WHEP (WebRTC) receiver support |
+| `ENABLE_WHEP` | `ON` | Enable WHEP (WebRTC) receiver |
 | `OBS_SOURCE_DIR` | — | Path to OBS Studio source tree |
 | `OBS_BIN_DIR` | — | Path to OBS binary directory |
 | `FFMPEG_DIR` | — | Path to FFmpeg dev build |
@@ -165,43 +198,62 @@ cmake --build build --config Release
 
 ```
 src/
-├── live-stream-source.cpp/h   # Main source plugin
-├── stream-demuxer.cpp/h       # FFmpeg stream demuxing
-├── video-decoder.cpp/h        # Video decoding (SW/HW)
-├── audio-decoder.cpp/h        # Audio decoding
-├── whep-client.cpp/h          # WHEP WebRTC client
-├── whep-signaling.cpp/h       # WHEP signaling
-├── ll-hls-client.cpp/h        # Amazon IVS LL-HLS client
-├── ll-hls-parser.cpp/h        # HLS playlist parser
-├── ll-hls-fetcher.cpp/h       # HLS segment fetcher
-├── bitrate-monitor.cpp/h      # Bitrate tracking
-├── catchup-controller.cpp/h   # A/V sync catch-up
-├── frame-queue.cpp/h          # Thread-safe frame queue
-├── overlay-renderer.cpp/h     # On-source text overlay
-├── reconnect-manager.cpp/h    # Auto-reconnect logic
-├── ws-stats-server.cpp/h      # WebSocket stats server
-├── plugin-settings.cpp/h      # Settings UI (Qt)
-├── stats-window.cpp/h         # Stats window (Qt)
-├── plugin-main.cpp/h          # Plugin entry point
-└── common.h                   # Shared constants & types
+├── core/
+│   ├── plugin-main.cpp/h          # Plugin entry point
+│   ├── live-stream-source.cpp/h   # Main source plugin
+│   ├── catchup-orchestrator.cpp/h # Catch-up state machine
+│   ├── plugin-settings.cpp/h      # Settings UI (Qt)
+│   └── common.h                   # Shared constants & types
+├── media/
+│   ├── stream-demuxer.cpp/h       # FFmpeg stream demuxing
+│   ├── video-decoder.cpp/h        # Video decoding (SW/HW)
+│   ├── audio-decoder.cpp/h        # Audio decoding + time-stretching
+│   ├── audio-time-stretcher.cpp/h # SoundTouch wrapper
+│   └── frame-queue.cpp/h          # Thread-safe frame queue
+├── protocols/
+│   ├── ll-hls/                    # Amazon IVS LL-HLS client
+│   └── whep/                      # WHEP WebRTC client
+├── utils/
+│   ├── buffer-manager.cpp/h       # Buffer depth monitoring
+│   ├── tempo-ramper.cpp/h         # Smooth tempo transitions
+│   └── bitrate-monitor.cpp/h      # Bitrate tracking
+├── network/
+│   ├── ws-stats-server.cpp/h      # WebSocket stats + binary preview server
+│   └── preview-encoder.cpp/h      # JPEG/PCM preview encoder
+└── ui/
+    └── dashboard-dialog.cpp/h     # Stats dashboard (Qt)
 ```
 
 ## Disclaimer
 
-This is an independent, third-party plugin. It is not affiliated with, endorsed by, or officially connected to OBS Studio, the OBS Project, Streamlabs, Amazon (IVS), or any other streaming platform. All product names and trademarks mentioned belong to their respective owners and are used purely for identification and compatibility.
-
-The plugin simply connects to publicly available streaming protocols (RTMP, HLS, SRT, WHEP, etc.) using standard methods. It does not modify, reverse-engineer, or interfere with the internal workings of OBS Studio or any backend streaming service. **Use of this tool is entirely at your own risk.**
+This is an independent, third-party plugin not affiliated with OBS Studio, the OBS Project, Streamlabs, Amazon (IVS), or any other streaming platform. It connects to publicly available streaming protocols using standard methods and does not modify or reverse-engineer any backend service. **Use at your own risk.**
 
 ## AI Disclosure
 
-To remain fully transparent and comply with the [OBS Forum Resource and IP Policy](https://obsproject.com/forum/threads/forum-resource-and-ip-policy.178569/), I'd like to clarify how this plugin was created.
+To comply with the [OBS Forum Resource and IP Policy](https://obsproject.com/forum/threads/forum-resource-and-ip-policy.178569/): the initial architecture was prototyped with AI assistance. The codebase has since been fully reviewed, refactored, and is now maintained through standard manual engineering.
 
-The initial architecture of the project was prototyped rapidly using an AI-assisted "vibe coding" workflow. Once the foundation was down, I went through the entire codebase to manually review, extensively refactor, and validate everything.
+The project is offered as-is. For issues, please [open a GitHub issue](https://github.com/xacnio/live-stream-source/issues).
 
-**We have completely phased out the vibe-coding methodology.** The project has fully transitioned back to standard manual software engineering. Moving forward, I am personally writing the code, handling optimizations, and making the technical decisions to ensure long-term maintainability and high code quality.
+## Third-Party Libraries
 
-The project is offered "as is" and without warranty. If you run into any issues, please [open an issue](https://github.com/xacnio/live-stream-source/issues).
+### SoundTouch
+
+- **Purpose**: Audio time-stretching for catch-up playback
+- **Version**: 2.3.3 — [codeberg.org/soundtouch/soundtouch](https://codeberg.org/soundtouch/soundtouch)
+- **License**: LGPL 2.1 — statically linked; source available at the link above
+
+### MbedTLS
+
+- **Purpose**: TLS/DTLS cryptography for the WHEP transport layer
+- **Version**: v3.6.2 — [github.com/Mbed-TLS/mbedtls](https://github.com/Mbed-TLS/mbedtls)
+- **License**: Apache 2.0 — statically linked
+
+### libdatachannel
+
+- **Purpose**: WebRTC implementation for the WHEP receiver
+- **Version**: v0.22.2 — [github.com/paullouisageneau/libdatachannel](https://github.com/paullouisageneau/libdatachannel)
+- **License**: MPL 2.0 — statically linked with bundled libsrtp, libjuice, usrsctp
 
 ## License
 
-This project is licensed under the [GNU General Public License v2.0](LICENSE).
+[GNU General Public License v2.0](LICENSE)

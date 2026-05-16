@@ -36,6 +36,24 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      # ── Dependency caching ──────────────────────────────────────────────────
+      # FetchContent downloads and builds: SoundTouch 2.3.3, MbedTLS v3.6.2,
+      # libdatachannel v0.22.2 (+ libjuice, libsrtp, usrsctp bundled inside).
+      # Caching _deps avoids ~5-15 min of re-download and re-compile on every run.
+      - name: Cache FetchContent dependencies
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: fetchcontent-${{ runner.os }}-${{ matrix.artifact_name }}-soundtouch-2.3.3-mbedtls-v3.6.2-datachannel-v0.22.2
+          restore-keys: |
+            fetchcontent-${{ runner.os }}-${{ matrix.artifact_name }}-
+
+      # ── Platform dependency install ─────────────────────────────────────────
       - name: Install Dependencies (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -48,7 +66,7 @@ jobs:
           version: '6.6.3'
           arch: 'win64_msvc2019_64'
 
-      - name: Install Dependencies and Build OBS (Ubuntu)
+      - name: Install Dependencies (Ubuntu)
         if: runner.os == 'Linux'
         run: |
           chmod +x ./CI/install_linux_deps.sh
@@ -60,37 +78,42 @@ jobs:
           chmod +x ./CI/install_macos_deps.sh
           ./CI/install_macos_deps.sh "${{ matrix.mac_deps_arch }}" "${{ matrix.mac_qt6_arch }}" "${{ matrix.mac_arch }}"
 
+      # ── Configure ───────────────────────────────────────────────────────────
       - name: Configure CMake
         shell: bash
         run: |
           if [ "$RUNNER_OS" == "Windows" ]; then
-            cmake -B build -DOBS_SOURCE_DIR="C:/obs-studio-src" -DOBS_BIN_DIR="C:/obs-studio-bin/bin/64bit" -DFFMPEG_DIR="C:/obs-deps" -DCMAKE_BUILD_TYPE=Release
+            cmake -B build \
+              -DOBS_SOURCE_DIR="C:/obs-studio-src" \
+              -DOBS_BIN_DIR="C:/obs-studio-bin/bin/64bit" \
+              -DFFMPEG_DIR="C:/obs-deps" \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DENABLE_WHEP=ON
           elif [ "$RUNNER_OS" == "macOS" ]; then
             export PKG_CONFIG_PATH="/tmp/obs-deps/lib/pkgconfig:$(brew --prefix ffmpeg)/lib/pkgconfig:$PKG_CONFIG_PATH"
-            cmake -B build -DCMAKE_BUILD_TYPE=Release -DOBS_SOURCE_DIR="/tmp/obs-studio-src" -DOBS_BIN_DIR="/tmp/OBS.app/Contents/Frameworks" -DFFMPEG_DIR="/tmp/obs-deps" -DQt6_DIR="/tmp/qt6/lib/cmake/Qt6" -DCMAKE_OSX_ARCHITECTURES="${{ matrix.mac_deps_arch }}"
+            cmake -B build \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DOBS_SOURCE_DIR="/tmp/obs-studio-src" \
+              -DOBS_BIN_DIR="/tmp/OBS.app/Contents/Frameworks" \
+              -DFFMPEG_DIR="/tmp/obs-deps" \
+              -DQt6_DIR="/tmp/qt6/lib/cmake/Qt6" \
+              -DCMAKE_OSX_ARCHITECTURES="${{ matrix.mac_deps_arch }}" \
+              -DENABLE_WHEP=ON
           else
-            cmake -B build -DCMAKE_BUILD_TYPE=Release -DOBS_SOURCE_DIR="/tmp/obs-studio-src" -DOBS_BIN_DIR="/tmp/obs-studio-installed"
+            cmake -B build \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DOBS_SOURCE_DIR="/tmp/obs-studio-src" \
+              -DOBS_BIN_DIR="/tmp/obs-studio-installed" \
+              -DENABLE_WHEP=ON
           fi
 
+      # ── Build ───────────────────────────────────────────────────────────────
       - name: Build Plugin
         run: cmake --build build --config Release
 
-      - name: List Available DLLs (Windows Debug)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          echo "=== Checking C:/obs-deps/bin ==="
-          ls -la C:/obs-deps/bin/*.dll 2>/dev/null || echo "No DLLs found in C:/obs-deps/bin"
-          echo ""
-          echo "=== Checking build/Release ==="
-          ls -la build/Release/*.dll 2>/dev/null || echo "No DLLs found in build/Release"
-          echo ""
-          echo "=== Searching for OpenSSL/mbedTLS DLLs ==="
-          find C:/ -name "libcrypto*.dll" -o -name "libssl*.dll" -o -name "mbedtls*.dll" 2>/dev/null | head -20 || echo "No SSL DLLs found"
-          echo ""
-          echo "=== Checking if plugin has external dependencies ==="
-          ldd build/Release/live-stream-source.dll 2>/dev/null || dumpbin //dependents build/Release/live-stream-source.dll 2>/dev/null || echo "Cannot check dependencies"
-
+      # ── Windows packaging ───────────────────────────────────────────────────
+      # MbedTLS and libdatachannel are statically linked into the plugin DLL.
+      # No OpenSSL or datachannel DLLs need to be shipped alongside it.
       - name: Build Windows Installer
         if: runner.os == 'Windows'
         run: |
@@ -110,19 +133,10 @@ jobs:
         run: |
           mkdir -p package/obs-plugins/live-stream-source/bin/64bit
           mkdir -p package/data/obs-plugins/live-stream-source/locale
-          cp build/Release/*live-stream-source*.dll package/obs-plugins/live-stream-source/bin/64bit/live-stream-source.dll
-          cp build/Release/*live-stream-source*.pdb package/obs-plugins/live-stream-source/bin/64bit/live-stream-source.pdb || true
-          
-          # Copy OpenSSL DLLs (required for libdatachannel/WebRTC)
-          echo "Copying OpenSSL DLLs..."
-          cp C:/hostedtoolcache/windows/Ruby/3.3.11/x64/bin/ruby_builtin_dlls/libcrypto-3-x64.dll package/obs-plugins/live-stream-source/bin/64bit/ || \
-          cp C:/hostedtoolcache/windows/Ruby/*/x64/bin/ruby_builtin_dlls/libcrypto-3-x64.dll package/obs-plugins/live-stream-source/bin/64bit/ || \
-          echo "ERROR: libcrypto-3-x64.dll not found"
-          
-          cp C:/hostedtoolcache/windows/Ruby/3.3.11/x64/bin/ruby_builtin_dlls/libssl-3-x64.dll package/obs-plugins/live-stream-source/bin/64bit/ || \
-          cp C:/hostedtoolcache/windows/Ruby/*/x64/bin/ruby_builtin_dlls/libssl-3-x64.dll package/obs-plugins/live-stream-source/bin/64bit/ || \
-          echo "ERROR: libssl-3-x64.dll not found"
-          
+          cp build/Release/live-stream-source.dll \
+             package/obs-plugins/live-stream-source/bin/64bit/live-stream-source.dll
+          cp build/Release/live-stream-source.pdb \
+             package/obs-plugins/live-stream-source/bin/64bit/live-stream-source.pdb 2>/dev/null || true
           cp -r data/locale/* package/data/obs-plugins/live-stream-source/locale/
 
       - name: Archive Artifacts (Windows)
@@ -133,12 +147,14 @@ jobs:
           path: package/
           retention-days: 1
 
+      # ── Linux packaging ─────────────────────────────────────────────────────
       - name: Prepare Linux Package
         if: runner.os == 'Linux'
         run: |
           mkdir -p package/live-stream-source/bin/64bit
           mkdir -p package/live-stream-source/data/locale
-          cp build/*live-stream-source*.so package/live-stream-source/bin/64bit/live-stream-source.so
+          cp build/live-stream-source.so \
+             package/live-stream-source/bin/64bit/live-stream-source.so
           cp -r data/locale/* package/live-stream-source/data/locale/
 
       - name: Archive Artifacts (Linux)
@@ -149,13 +165,14 @@ jobs:
           path: package/
           retention-days: 1
 
+      # ── macOS packaging ─────────────────────────────────────────────────────
       - name: Prepare macOS Package
         if: startsWith(runner.os, 'macOS')
         run: |
           PLUGIN="package/live-stream-source.plugin/Contents"
           mkdir -p "$PLUGIN/MacOS"
           mkdir -p "$PLUGIN/Resources/locale"
-          cp build/*live-stream-source*.so "$PLUGIN/MacOS/live-stream-source.so"
+          cp build/live-stream-source.so "$PLUGIN/MacOS/live-stream-source.so"
           cp -r data/locale/* "$PLUGIN/Resources/locale/"
 
       - name: Archive Artifacts (macOS)
@@ -166,6 +183,7 @@ jobs:
           path: package/
           retention-days: 1
 
+  # ── macOS Universal Binary ─────────────────────────────────────────────────
   universal-mac:
     name: Create macOS Universal Binary
     needs: build
@@ -186,7 +204,6 @@ jobs:
             VERSION="0.0.0"
           fi
 
-          # Create .plugin bundle
           PLUGIN="universal_package/live-stream-source.plugin/Contents"
           mkdir -p "$PLUGIN/MacOS"
           mkdir -p "$PLUGIN/Resources/locale"
@@ -197,8 +214,7 @@ jobs:
 
           cp -r data/locale/* "$PLUGIN/Resources/locale/"
 
-          # ── Build installer for user home directory ──
-          # Step 1: Create a component package that installs relative to the target location
+          # Installer
           PKG_ROOT="pkg_root/live-stream-source.plugin"
           mkdir -p "pkg_root"
           cp -r universal_package/live-stream-source.plugin "$PKG_ROOT"
@@ -209,15 +225,11 @@ jobs:
                    --install-location "Library/Application Support/obs-studio/plugins" \
                    "live-stream-source.pkg"
 
-          # Step 2: Create a Distribution XML that restricts installation to the user's home directory
           cat > distribution.xml << 'DISTEOF'
           <?xml version="1.0" encoding="utf-8"?>
           <installer-gui-script minSpecVersion="2">
               <title>Live Stream Source</title>
-              
-              <!-- Allow ONLY installation to the user's home directory -->
               <domains enable_currentUserHome="true" enable_localSystem="false" enable_anywhere="false" />
-              
               <options customize="never" require-scripts="false" hostArchitectures="x86_64,arm64"/>
               <choices-outline>
                   <line choice="default"/>
@@ -229,10 +241,8 @@ jobs:
           </installer-gui-script>
           DISTEOF
 
-          # Replace version placeholder
           sed -i '' "s/VERSION_PLACEHOLDER/$VERSION/g" distribution.xml
 
-          # Step 3: Build the final product archive
           mkdir -p final_installer
           productbuild --distribution distribution.xml \
                        --package-path . \
@@ -252,6 +262,7 @@ jobs:
           path: final_installer/*.pkg
           retention-days: 1
 
+  # ── GitHub Release ─────────────────────────────────────────────────────────
   release:
     name: Create GitHub Release
     needs: [build, universal-mac]
@@ -262,7 +273,7 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-      
+
       - name: Download Artifacts
         uses: actions/download-artifact@v4
         with:
@@ -285,7 +296,6 @@ jobs:
               fi
             fi
           done
-          # Copy zip files directly into artifacts root for the release pattern
           mv *.zip ../
 
       - name: Release

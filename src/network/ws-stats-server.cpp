@@ -1,6 +1,5 @@
 #include "network/ws-stats-server.h"
 #include "core/common.h"
-#include <jansson.h>
 #include <sstream>
 #include <vector>
 extern "C" {
@@ -115,6 +114,121 @@ void WsStatsServer::remove_source(const std::string &source_name) {
   sources_.erase(source_name);
 }
 
+void WsStatsServer::register_command_handler(const std::string &source_name,
+                                             CommandCallback cb) {
+  std::lock_guard<std::mutex> lock(cmd_handlers_mutex_);
+  cmd_handlers_[source_name] = std::move(cb);
+}
+
+void WsStatsServer::unregister_command_handler(const std::string &source_name) {
+  std::lock_guard<std::mutex> lock(cmd_handlers_mutex_);
+  cmd_handlers_.erase(source_name);
+}
+
+void WsStatsServer::register_connect_callback(const std::string &source_name,
+                                               ConnectCallback cb) {
+  std::lock_guard<std::mutex> lock(connect_cbs_mutex_);
+  connect_callbacks_[source_name] = std::move(cb);
+}
+
+void WsStatsServer::unregister_connect_callback(const std::string &source_name) {
+  std::lock_guard<std::mutex> lock(connect_cbs_mutex_);
+  connect_callbacks_.erase(source_name);
+}
+
+std::string WsStatsServer::decode_ws_frame(const char *data, int len) {
+  lss_log_debug("WsServer: decoding frame len=%d, b0=0x%02X b1=0x%02X",
+               len, len > 0 ? (uint8_t)data[0] : 0,
+               len > 1 ? (uint8_t)data[1] : 0);
+  if (len < 2)
+    return "";
+
+  const uint8_t b0 = (uint8_t)data[0];
+  const uint8_t b1 = (uint8_t)data[1];
+
+  const int opcode = b0 & 0x0F;
+  if (opcode == 0x8)
+    return "";  // close frame
+  if (opcode != 0x1 && opcode != 0x0)
+    return "";  // not text or continuation
+
+  const bool masked = (b1 & 0x80) != 0;
+  uint64_t payload_len = b1 & 0x7F;
+  int offset = 2;
+
+  if (payload_len == 126) {
+    if (len < 4)
+      return "";
+    payload_len = ((uint64_t)(uint8_t)data[2] << 8) | (uint8_t)data[3];
+    offset = 4;
+  } else if (payload_len == 127) {
+    if (len < 10)
+      return "";
+    payload_len = 0;
+    for (int i = 0; i < 8; i++)
+      payload_len = (payload_len << 8) | (uint8_t)data[2 + i];
+    offset = 10;
+  }
+
+  uint8_t mask[4] = {0, 0, 0, 0};
+  if (masked) {
+    if (len < offset + 4)
+      return "";
+    mask[0] = (uint8_t)data[offset];
+    mask[1] = (uint8_t)data[offset + 1];
+    mask[2] = (uint8_t)data[offset + 2];
+    mask[3] = (uint8_t)data[offset + 3];
+    offset += 4;
+  }
+
+  if ((int64_t)len < (int64_t)(offset + payload_len))
+    return "";
+
+  std::string result(payload_len, '\0');
+  for (uint64_t i = 0; i < payload_len; i++)
+    result[i] = masked ? (char)((uint8_t)data[offset + i] ^ mask[i % 4])
+                       : data[offset + i];
+
+  return result;
+}
+
+void WsStatsServer::handle_client_message(const std::string &msg) {
+  lss_log_debug("WsServer: incoming message: %s", msg.c_str());
+
+  obs_data_t *obj = obs_data_create_from_json(msg.c_str());
+  if (!obj) {
+    lss_log_warn("WsServer: JSON parse failed for: %s", msg.c_str());
+    return;
+  }
+
+  const char *cmd_raw = obs_data_get_string(obj, "command");
+  const char *src_raw = obs_data_get_string(obj, "source");
+
+  std::string cmd = cmd_raw ? cmd_raw : "";
+  std::string src = src_raw ? src_raw : "";
+  obs_data_release(obj);
+
+  if (cmd.empty() || src.empty()) {
+    lss_log_warn("WsServer: message missing 'command' or 'source'");
+    return;
+  }
+
+  lss_log_info("WsServer: command='%s' source='%s'", cmd.c_str(), src.c_str());
+
+  CommandCallback cb;
+  {
+    std::lock_guard<std::mutex> lock(cmd_handlers_mutex_);
+    auto it = cmd_handlers_.find(src);
+    if (it != cmd_handlers_.end())
+      cb = it->second;
+    else
+      lss_log_warn("WsServer: no handler for source '%s' (registered: %d)",
+                   src.c_str(), (int)cmd_handlers_.size());
+  }
+  if (cb)
+    cb(cmd);
+}
+
 void WsStatsServer::broadcast_all() {
   std::string combined;
   {
@@ -147,15 +261,18 @@ void WsStatsServer::broadcast_all() {
     send_ws_frame(combined);
 }
 
-void WsStatsServer::send_ws_frame(const std::string &message) {
+void WsStatsServer::send_ws_frame_raw(const uint8_t *data, size_t len,
+                                       uint8_t opcode) {
+  // Shared frame writer used by both the text broadcast and the binary
+  // preview-encoder pushes. opcode = 0x81 (FIN+Text) or 0x82 (FIN+Binary).
   std::lock_guard<std::mutex> lock(clients_mutex_);
   if (clients_.empty())
     return;
 
   std::vector<uint8_t> frame;
-  frame.push_back(0x81); // FIN + Text
+  frame.reserve(len + 10);
+  frame.push_back(opcode);
 
-  size_t len = message.length();
   if (len < 126) {
     frame.push_back((uint8_t)len);
   } else if (len < 65536) {
@@ -168,24 +285,43 @@ void WsStatsServer::send_ws_frame(const std::string &message) {
       frame.push_back((len >> (i * 8)) & 0xFF);
   }
 
-  frame.insert(frame.end(), message.begin(), message.end());
+  frame.insert(frame.end(), data, data + len);
 
   auto it = clients_.begin();
   while (it != clients_.end()) {
     SOCKET s = *it;
+    const char *ptr = (const char *)frame.data();
+    int remaining = (int)frame.size();
+    bool ok = true;
+    while (remaining > 0) {
 #ifdef _WIN32
-    int sent = send(s, (const char *)frame.data(), (int)frame.size(), 0);
+      int sent = send(s, ptr, remaining, 0);
 #else
-    int sent =
-        send(s, (const char *)frame.data(), (int)frame.size(), MSG_NOSIGNAL);
+      int sent = send(s, ptr, remaining, MSG_NOSIGNAL);
 #endif
-    if (sent == SOCKET_ERROR) {
+      if (sent == SOCKET_ERROR) {
+        ok = false;
+        break;
+      }
+      ptr += sent;
+      remaining -= sent;
+    }
+    if (!ok) {
       closesocket(s);
       it = clients_.erase(it);
     } else {
       ++it;
     }
   }
+}
+
+void WsStatsServer::send_ws_frame(const std::string &message) {
+  send_ws_frame_raw(reinterpret_cast<const uint8_t *>(message.data()),
+                    message.size(), 0x81 /* FIN + Text */);
+}
+
+void WsStatsServer::send_binary(const uint8_t *data, size_t len) {
+  send_ws_frame_raw(data, len, 0x82 /* FIN + Binary */);
 }
 
 void WsStatsServer::run() {
@@ -268,21 +404,29 @@ void WsStatsServer::run() {
         }
       }
 
-      std::lock_guard<std::mutex> lock(clients_mutex_);
-      auto it = clients_.begin();
-      while (it != clients_.end()) {
-        SOCKET client = *it;
-        if (FD_ISSET(client, &read_fds)) {
-          char buf[1024];
-          int bytes = recv(client, buf, sizeof(buf), 0);
-          if (bytes <= 0) {
-            closesocket(client);
-            it = clients_.erase(it);
-            continue;
+      std::vector<std::string> incoming;
+      {
+        std::lock_guard<std::mutex> lock(clients_mutex_);
+        auto it = clients_.begin();
+        while (it != clients_.end()) {
+          SOCKET client = *it;
+          if (FD_ISSET(client, &read_fds)) {
+            char buf[4096];
+            int bytes = recv(client, buf, sizeof(buf), 0);
+            if (bytes <= 0) {
+              closesocket(client);
+              it = clients_.erase(it);
+              continue;
+            }
+            std::string msg = decode_ws_frame(buf, bytes);
+            if (!msg.empty())
+              incoming.push_back(std::move(msg));
           }
+          ++it;
         }
-        ++it;
       }
+      for (auto &msg : incoming)
+        handle_client_message(msg);
     }
   }
 
@@ -338,9 +482,22 @@ void WsStatsServer::handle_handshake(SOCKET client) {
   send(client, resp_str.c_str(), (int)resp_str.length(), MSG_NOSIGNAL);
 #endif
 
-  std::lock_guard<std::mutex> lock(clients_mutex_);
-  clients_.push_back(client);
+  {
+    std::lock_guard<std::mutex> lock(clients_mutex_);
+    clients_.push_back(client);
+  }
   lss_log_info("WebSocket Server: Handshake complete, client added");
+
+  // Notify all sources so they can reset per-connection state (e.g. preview
+  // flags). Callbacks run without any WsStatsServer lock held.
+  std::vector<ConnectCallback> cbs;
+  {
+    std::lock_guard<std::mutex> lock(connect_cbs_mutex_);
+    for (auto &kv : connect_callbacks_)
+      cbs.push_back(kv.second);
+  }
+  for (auto &cb : cbs)
+    cb();
 }
 
 } // namespace lss

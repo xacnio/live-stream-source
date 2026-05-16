@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(live-stream-source VERSION 1.1.0 LANGUAGES C CXX)
+project(live-stream-source VERSION 1.2.0 LANGUAGES C CXX)
 
 get_filename_component(_cmake_cxx_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
 
@@ -149,6 +149,7 @@ if(WIN32)
     add_ffmpeg_lib(avutil)
     add_ffmpeg_lib(swscale)
     add_ffmpeg_lib(swresample)
+    add_ffmpeg_lib(avfilter)
 
 else()
     # ──────────────────────────────────────────────────────────────
@@ -187,6 +188,7 @@ else()
         add_ffmpeg_lib(avutil)
         add_ffmpeg_lib(swscale)
         add_ffmpeg_lib(swresample)
+        add_ffmpeg_lib(avfilter)
 
     else()
         # OBS dependencies for Linux
@@ -225,7 +227,7 @@ else()
         endif()
         
         # FFmpeg dependencies for Linux
-        pkg_check_modules(FFMPEG REQUIRED libavformat libavcodec libavutil libswscale libswresample)
+        pkg_check_modules(FFMPEG REQUIRED libavformat libavcodec libavutil libswscale libswresample libavfilter)
         
         function(add_ffmpeg_lib name lib_name)
             add_library(ffmpeg::${name} INTERFACE IMPORTED)
@@ -239,8 +241,36 @@ else()
         add_ffmpeg_lib(avutil avutil)
         add_ffmpeg_lib(swscale swscale)
         add_ffmpeg_lib(swresample swresample)
+        add_ffmpeg_lib(avfilter avfilter)
     endif()
 endif()
+
+# ──────────────────────────────────────────────────────────────
+# SoundTouch for professional audio time-stretching
+# ──────────────────────────────────────────────────────────────
+include(FetchContent)
+
+# Set minimum CMake policy version for SoundTouch compatibility
+if(NOT DEFINED CMAKE_POLICY_VERSION_MINIMUM)
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "Minimum CMake policy version" FORCE)
+endif()
+
+FetchContent_Declare(
+    SoundTouch
+    GIT_REPOSITORY https://codeberg.org/soundtouch/soundtouch.git
+    GIT_TAG        2.3.3
+    GIT_SHALLOW    TRUE
+)
+
+# Configure SoundTouch build options
+# BUILD_SHARED_LIBS OFF forces add_library(SoundTouch ...) to produce a static lib.
+# SOUNDTOUCH_DLL controls only the separate C wrapper (SoundTouchDLL), unrelated.
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(SOUNDSTRETCH OFF CACHE BOOL "Disable soundstretch utility" FORCE)
+
+FetchContent_MakeAvailable(SoundTouch)
+
+message(STATUS "SoundTouch library configured successfully")
 
 # ──────────────────────────────────────────────────────────────
 # Plugin target
@@ -262,14 +292,18 @@ add_custom_command(
 set(PLUGIN_SOURCES
     src/core/plugin-main.cpp
     src/core/live-stream-source.cpp
+    src/core/catchup-orchestrator.cpp
     src/media/stream-demuxer.cpp
     src/media/video-decoder.cpp
     src/media/audio-decoder.cpp
+    src/media/audio-time-stretcher.cpp
     src/media/frame-queue.cpp
     src/utils/bitrate-monitor.cpp
-    src/utils/catchup-controller.cpp
     src/utils/reconnect-manager.cpp
+    src/utils/buffer-manager.cpp
+    src/utils/tempo-ramper.cpp
     src/network/ws-stats-server.cpp
+    src/network/preview-encoder.cpp
     src/protocols/ll-hls/ll-hls-parser.cpp
     src/protocols/ll-hls/ll-hls-fetcher.cpp
     src/protocols/ll-hls/ll-hls-client.cpp
@@ -283,14 +317,15 @@ set(PLUGIN_HEADERS
     ${CMAKE_CURRENT_BINARY_DIR}/html-assets.h
     src/core/plugin-main.h
     src/core/live-stream-source.h
+    src/core/catchup-orchestrator.h
     src/media/stream-demuxer.h
     src/media/video-decoder.h
     src/media/audio-decoder.h
     src/media/frame-queue.h
     src/utils/bitrate-monitor.h
-    src/utils/catchup-controller.h
     src/utils/reconnect-manager.h
     src/network/ws-stats-server.h
+    src/network/preview-encoder.h
     src/core/common.h
     src/protocols/ll-hls/ll-hls-parser.h
     src/protocols/ll-hls/ll-hls-fetcher.h
@@ -328,9 +363,11 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     ffmpeg::avutil
     ffmpeg::swscale
     ffmpeg::swresample
+    ffmpeg::avfilter
     Qt6::Widgets
     Qt6::Core
     Qt6::Network
+    SoundTouch
 )
 
 if(NOT WIN32)
@@ -348,13 +385,59 @@ endif()
 if(ENABLE_WHEP)
     message(STATUS "WHEP (WebRTC) support: ENABLED")
 
-    include(FetchContent)
     set(NO_EXAMPLES ON CACHE BOOL "" FORCE)
     set(NO_TESTS ON CACHE BOOL "" FORCE)
     set(NO_WEBSOCKET OFF CACHE BOOL "" FORCE)
-    if(APPLE)
-        set(USE_OPENSSL OFF CACHE BOOL "Disable system OpenSSL (fixes cross-compile on Mac)" FORCE)
-        set(USE_MBEDTLS ON CACHE BOOL "Use mbedTLS instead" FORCE)
+    # Use MbedTLS instead of OpenSSL — and build it statically ourselves
+    # below — so the plugin DLL ships with no runtime OpenSSL dependency
+    # (no libcrypto-3-x64.dll / libssl-3-x64.dll alongside the plugin).
+    # NOTE: this only affects the libdatachannel we statically embed in
+    # our plugin. It does NOT touch OBS's own datachannel.dll in
+    # obs-plugins/64bit, which is unrelated and stays as-is.
+    set(USE_OPENSSL OFF CACHE BOOL "Force MbedTLS — avoids OpenSSL DLL runtime dep" FORCE)
+    set(USE_MBEDTLS ON CACHE BOOL "Use mbedTLS (static, no runtime DLLs)" FORCE)
+
+    # Fix for CMake 4.x: old deps (plog) use cmake_minimum_required < 3.5
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+
+    # Build MbedTLS ourselves as a static library BEFORE libdatachannel.
+    # The thirdparty/lib/libmbedtls.lib is an IMPORT lib pointing at
+    # obs-deps' MbedTLS DLLs — using it would just swap libcrypto.dll for
+    # libmbedtls.dll. We fetch and statically build MbedTLS, then expose
+    # it as MbedTLS::* alias targets, and prepend our shim FindMbedTLS.cmake
+    # so libdatachannel + libsrtp + usrsctp all resolve to OUR static libs
+    # instead of finding the dynamic ones in thirdparty/.
+    list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_SOURCE_DIR}/cmake")
+    if(NOT TARGET MbedTLS::MbedTLS)
+        FetchContent_Declare(
+            mbedtls
+            GIT_REPOSITORY https://github.com/Mbed-TLS/mbedtls.git
+            GIT_TAG        v3.6.2
+            GIT_SHALLOW    TRUE
+        )
+        set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
+        set(ENABLE_TESTING  OFF CACHE BOOL "" FORCE)
+        # Force STATIC — must be set before MakeAvailable so MbedTLS's own
+        # add_library() calls pick STATIC, not SHARED.
+        set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(mbedtls)
+        if(TARGET mbedtls)
+            # MbedTLS v3.x ships with DTLS-SRTP disabled in its stock config.
+            # libdatachannel needs it for WebRTC key exchange, so we layer
+            # an additional user-config header on top. Public so the define
+            # propagates into libdatachannel's own translation units.
+            set(_mbedtls_user_cfg "${CMAKE_SOURCE_DIR}/cmake/mbedtls_user_config.h")
+            foreach(_t IN ITEMS mbedtls mbedcrypto mbedx509)
+                target_compile_definitions(${_t} PUBLIC
+                    "MBEDTLS_USER_CONFIG_FILE=\"${_mbedtls_user_cfg}\"")
+            endforeach()
+            unset(_mbedtls_user_cfg)
+
+            add_library(MbedTLS::MbedTLS    ALIAS mbedtls)
+            add_library(MbedTLS::MbedCrypto ALIAS mbedcrypto)
+            add_library(MbedTLS::MbedX509   ALIAS mbedx509)
+            message(STATUS "Static MbedTLS built — plugin will be self-contained")
+        endif()
     endif()
 
     FetchContent_Declare(
@@ -364,9 +447,16 @@ if(ENABLE_WHEP)
         GIT_SHALLOW    TRUE
         GIT_SUBMODULES_RECURSE TRUE
     )
-    # Fix for CMake 4.x: old deps (plog) use cmake_minimum_required < 3.5
-    set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+    # Skip install rules while pulling in libdatachannel + libsrtp + usrsctp.
+    # libsrtp tries to register `srtp2` in its install export set, but srtp2
+    # privately links our FetchContent `mbedtls` target which isn't in any
+    # export set → generate-step error. We don't run `cmake --install` for
+    # those deps anyway (they're statically linked into our plugin), so
+    # silencing their install() registrations is harmless. The flag is
+    # re-enabled below before our own install(TARGETS ${PROJECT_NAME}).
+    set(CMAKE_SKIP_INSTALL_RULES ON)
     FetchContent_MakeAvailable(libdatachannel)
+    set(CMAKE_SKIP_INSTALL_RULES OFF)
 
     target_link_libraries(${PROJECT_NAME} PRIVATE LibDataChannel::LibDataChannelStatic)
     target_compile_definitions(${PROJECT_NAME} PRIVATE HAS_LIBDATACHANNEL)
@@ -383,7 +473,8 @@ if(WIN32)
     )
 
     # Generate PDB debug info in Release builds for crash analysis
-    target_compile_options(${PROJECT_NAME} PRIVATE /Zi)
+    # Add /FS flag to allow parallel compilation with PDB files
+    target_compile_options(${PROJECT_NAME} PRIVATE /Zi /FS)
     target_link_options(${PROJECT_NAME} PRIVATE /DEBUG /OPT:REF /OPT:ICF)
 endif()
 
@@ -398,3 +489,4 @@ install(TARGETS ${PROJECT_NAME}
 install(DIRECTORY "data/locale/"
     DESTINATION "data/obs-plugins/${PROJECT_NAME}/locale"
 )
+

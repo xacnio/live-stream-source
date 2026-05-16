@@ -23,6 +23,7 @@ public:
   int height() const { return height_; }
   void set_stream_time_base(AVRational tb) { stream_tb_ = tb; }
   bool is_hw_active() const { return hw_device_ctx_ != nullptr; }
+  bool is_initialized() const { return codec_ctx_ != nullptr; }
 
 private:
   int init_hw_decoder(const AVCodec *codec, const AVCodecParameters *par);
@@ -39,7 +40,7 @@ private:
   bool hw_accel_requested_ = false;
 
   int consecutive_errors_ = 0;
-  static constexpr int ERROR_THRESHOLD = 30;
+  static constexpr int ERROR_THRESHOLD = 10;
 };
 
 } // namespace lss

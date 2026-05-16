@@ -326,6 +326,136 @@
             opacity: 0.8;
         }
 
+        .header-right {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 6px;
+        }
+
+        .action-buttons {
+            display: flex;
+            gap: 8px;
+        }
+
+        .btn-action {
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.10);
+            color: var(--text-secondary);
+            padding: 5px 13px;
+            border-radius: var(--radius-sm);
+            font-size: 12px;
+            font-weight: 600;
+            font-family: 'Inter', sans-serif;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            letter-spacing: 0.2px;
+        }
+
+        .btn-action:hover {
+            background: rgba(255, 255, 255, 0.12);
+            border-color: rgba(255, 255, 255, 0.20);
+            color: var(--text-primary);
+        }
+
+        .btn-action.btn-live-edge {
+            color: var(--success);
+            border-color: rgba(46, 204, 113, 0.25);
+        }
+
+        .btn-action.btn-live-edge:hover {
+            background: rgba(46, 204, 113, 0.10);
+            border-color: rgba(46, 204, 113, 0.40);
+        }
+
+        .btn-action:disabled {
+            opacity: 0.35;
+            cursor: not-allowed;
+            pointer-events: none;
+        }
+
+        /* Live preview panel */
+        .preview-panel {
+            margin: 0 28px 20px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+        .preview-stage {
+            position: relative;
+            background: #000;
+            aspect-ratio: 16 / 9;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .preview-stage img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            user-select: none;
+        }
+        .preview-placeholder {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-secondary);
+            font-size: 14px;
+            letter-spacing: 0.4px;
+            background: linear-gradient(135deg, #0d1117 0%, #161b22 100%);
+        }
+        .preview-divider {
+            width: 1px;
+            height: 22px;
+            background: var(--border);
+            margin: 0 2px;
+        }
+        .preview-overlay {
+            position: absolute;
+            top: 12px;
+            right: 12px;
+            padding: 6px 10px;
+            background: rgba(231, 76, 60, 0.85);
+            color: #fff;
+            font-size: 12px;
+            border-radius: 6px;
+            letter-spacing: 0.5px;
+        }
+        .preview-controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            padding: 12px 16px;
+            border-top: 1px solid var(--border);
+            background: var(--surface-alt, rgba(255,255,255,0.02));
+        }
+        .preview-meta {
+            margin-left: auto;
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+        .btn-toggle {
+            background: rgba(255,255,255,0.04);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 8px 14px;
+            border-radius: 8px;
+            font-size: 13px;
+            cursor: pointer;
+            transition: 0.15s;
+        }
+        .btn-toggle:hover {
+            background: rgba(255,255,255,0.08);
+        }
+        .btn-toggle[data-state="on"] {
+            background: rgba(231, 76, 60, 0.18);
+            border-color: rgba(231, 76, 60, 0.55);
+            color: #ff8c7a;
+        }
+
         .color-accent {
             color: var(--accent) !important;
         }
@@ -377,6 +507,24 @@
             <!-- Tabs injected dynamically -->
         </div>
 
+        <!-- Live preview persists across re-renders so the <img>/AudioContext
+             don't get torn down every stats tick. -->
+        <div class="preview-panel" id="previewPanel" hidden>
+            <div class="preview-stage">
+                <img id="previewImg" alt="Live preview" draggable="false" hidden />
+                <div class="preview-placeholder" id="previewPlaceholder">▶ Press Play to start preview</div>
+                <div class="preview-overlay" id="previewMutedBadge" hidden>🔇 Output muted</div>
+            </div>
+            <div class="preview-controls">
+                <button class="btn-toggle" id="btnPlay"  data-state="off">▶ Play Preview</button>
+                <button class="btn-toggle" id="btnAudio" data-state="off">🔈 Audio: Off</button>
+                <span class="preview-divider"></span>
+                <button class="btn-toggle" id="btnMute"  data-state="off">🔊 Mute Output</button>
+                <button class="btn-toggle" id="btnBlur"  data-state="off">⚫ Blur Output</button>
+                <span class="preview-meta" id="previewMeta"></span>
+            </div>
+        </div>
+
         <div class="dashboard-content" id="dashboardContent">
             <div class="empty-state">
                 <p>Waiting for connection...</p>
@@ -393,12 +541,39 @@
                 this.sourcesData = {};
                 this.activeSourceId = null;
 
+                // Preview state — kept outside the per-tick re-render so the
+                // <img>, audio graph, and outstanding object URLs persist.
+                this.previewObjectUrl = null;
+                this.audioCtx = null;
+                this.audioGain = null;
+                this.audioNextTime = 0;
+                this.previewLastVideoMs = 0;
+                this.previewSampleCount = 0;
+                this.muteState = false;
+                this.blurState = false;
+
+                // Preview gates — default OFF so the page doesn't burn CPU
+                // and bandwidth on a feed nobody asked for. User flips them
+                // via the Play / Audio buttons; we forward as commands so
+                // the plugin can also short-circuit its encoder.
+                this.previewVideoOn = false;
+                this.previewAudioOn = false;
+
                 this.elements = {
                     input: document.getElementById('wsInput'),
                     btnConnect: document.getElementById('connectBtn'),
                     tabsContainer: document.getElementById('sourceTabs'),
                     contentContainer: document.getElementById('dashboardContent'),
-                    globalStatus: document.getElementById('globalStatus')
+                    globalStatus: document.getElementById('globalStatus'),
+                    previewPanel: document.getElementById('previewPanel'),
+                    previewImg: document.getElementById('previewImg'),
+                    previewPlaceholder: document.getElementById('previewPlaceholder'),
+                    previewMutedBadge: document.getElementById('previewMutedBadge'),
+                    previewMeta: document.getElementById('previewMeta'),
+                    btnPlay: document.getElementById('btnPlay'),
+                    btnAudio: document.getElementById('btnAudio'),
+                    btnMute: document.getElementById('btnMute'),
+                    btnBlur: document.getElementById('btnBlur')
                 };
 
                 this.bindEvents();
@@ -413,6 +588,8 @@
                 this.elements.input.addEventListener('keypress', (e) => {
                     if (e.key === 'Enter') this.initConnection(this.elements.input.value);
                 });
+
+                this.setupPreviewControls();
             }
 
             initConnection(url = null) {
@@ -427,6 +604,7 @@
 
                 try {
                     this.socket = new WebSocket(targetUrl);
+                    this.socket.binaryType = 'arraybuffer';
                 } catch (err) {
                     this.elements.globalStatus.textContent = `Invalid URL provided.`;
                     return;
@@ -435,9 +613,17 @@
                 this.socket.onopen = () => {
                     this.elements.globalStatus.textContent = `Connected securely to ${targetUrl}`;
                     this.elements.globalStatus.style.color = 'var(--success)';
+                    // Lazily start AudioContext on first connect — browsers
+                    // require a user gesture, but pressing Connect counts.
+                    this.ensureAudioContext();
+                    this.elements.previewPanel.hidden = false;
                 };
 
                 this.socket.onmessage = (event) => {
+                    if (event.data instanceof ArrayBuffer) {
+                        this.handleBinaryMessage(event.data);
+                        return;
+                    }
                     try {
                         const payload = JSON.parse(event.data);
                         if (payload && payload.sources) {
@@ -507,6 +693,149 @@
                 const data = this.sourcesData[this.activeSourceId];
                 const htmlTemplate = this.generateDashboardHTML(data);
                 this.elements.contentContainer.innerHTML = htmlTemplate;
+
+                const btnRefresh = document.getElementById('btnRefresh');
+                const btnLiveEdge = document.getElementById('btnLiveEdge');
+                if (btnRefresh)
+                    btnRefresh.addEventListener('click', () => this.sendCommand('refresh', btnRefresh));
+                if (btnLiveEdge)
+                    btnLiveEdge.addEventListener('click', () => this.sendCommand('live_to_edge', btnLiveEdge));
+            }
+
+            sendCommand(command, btn) {
+                if (!this.socket || this.socket.readyState !== WebSocket.OPEN || !this.activeSourceId)
+                    return;
+                this.socket.send(JSON.stringify({ command, source: this.activeSourceId }));
+                if (btn) {
+                    btn.disabled = true;
+                    setTimeout(() => { btn.disabled = false; }, 2000);
+                }
+            }
+
+            // Binary frames carry a 1-byte type tag prefix:
+            //   0x01 = JPEG video frame
+            //   0x02 = Float32 mono 16 kHz PCM audio chunk
+            handleBinaryMessage(buffer) {
+                const view = new DataView(buffer);
+                if (buffer.byteLength < 2) return;
+                const tag = view.getUint8(0);
+                const payload = buffer.slice(1);
+                if (tag === 0x01) {
+                    this.onVideoFrame(payload);
+                } else if (tag === 0x02) {
+                    this.onAudioChunk(payload);
+                }
+            }
+
+            onVideoFrame(bytes) {
+                if (!this.previewVideoOn) return;
+                const blob = new Blob([bytes], { type: 'image/jpeg' });
+                const url = URL.createObjectURL(blob);
+                const oldUrl = this.previewObjectUrl;
+                this.previewObjectUrl = url;
+                this.elements.previewImg.src = url;
+                this.elements.previewImg.style.display = 'block';
+                this.elements.previewPlaceholder.style.display = 'none';
+                // Free the prior URL after the new frame has at least had a
+                // chance to start decoding. revokeObjectURL is safe to call
+                // on URLs the browser is still rendering — the underlying
+                // blob stays alive until rendering completes.
+                if (oldUrl) {
+                    setTimeout(() => URL.revokeObjectURL(oldUrl), 0);
+                }
+                const now = performance.now();
+                if (now - this.previewLastVideoMs > 500) {
+                    this.elements.previewMeta.textContent =
+                        `video ${(bytes.byteLength / 1024).toFixed(0)} KB`;
+                }
+                this.previewLastVideoMs = now;
+            }
+
+            ensureAudioContext() {
+                if (this.audioCtx) return;
+                try {
+                    const Ctx = window.AudioContext || window.webkitAudioContext;
+                    // Let the browser pick the device sample rate; we
+                    // re-sample our 16 kHz chunks into a buffer that the
+                    // graph then resamples again on play. The double-resample
+                    // cost is negligible at monitoring volume.
+                    this.audioCtx = new Ctx();
+                    this.audioGain = this.audioCtx.createGain();
+                    this.audioGain.gain.value = 1.0;
+                    this.audioGain.connect(this.audioCtx.destination);
+                } catch (e) {
+                    console.warn('AudioContext init failed', e);
+                }
+            }
+
+            onAudioChunk(buffer) {
+                if (!this.audioCtx || !this.previewAudioOn) return;
+                const samples = new Float32Array(buffer);
+                if (samples.length === 0) return;
+                const SRC_RATE = 16000;
+                const audioBuf = this.audioCtx.createBuffer(1, samples.length, SRC_RATE);
+                audioBuf.copyToChannel(samples, 0);
+
+                const src = this.audioCtx.createBufferSource();
+                src.buffer = audioBuf;
+                src.connect(this.audioGain);
+
+                // Maintain a small 60 ms jitter window ahead of the playback
+                // clock. If we've fallen behind (network blip), reset to
+                // `now + jitter` to avoid scheduling in the past.
+                const jitter = 0.06;
+                const nowT = this.audioCtx.currentTime;
+                if (this.audioNextTime < nowT + 0.01) {
+                    this.audioNextTime = nowT + jitter;
+                }
+                src.start(this.audioNextTime);
+                this.audioNextTime += audioBuf.duration;
+                this.previewSampleCount += samples.length;
+            }
+
+            setupPreviewControls() {
+                if (this._previewWired) return;
+                this._previewWired = true;
+                this.elements.btnPlay.addEventListener('click', () => {
+                    this.previewVideoOn = !this.previewVideoOn;
+                    this.elements.btnPlay.dataset.state = this.previewVideoOn ? 'on' : 'off';
+                    this.elements.btnPlay.textContent = this.previewVideoOn ? '⏸ Stop Preview' : '▶ Play Preview';
+                    if (this.previewVideoOn) {
+                        this.elements.previewPlaceholder.style.display = 'none';
+                    } else {
+                        this.elements.previewImg.style.display = 'none';
+                        this.elements.previewPlaceholder.style.display = '';
+                        this.elements.previewMeta.textContent = '';
+                    }
+                    this.sendCommand(this.previewVideoOn ? 'preview_video_on' : 'preview_video_off', null);
+                });
+                this.elements.btnAudio.addEventListener('click', () => {
+                    this.previewAudioOn = !this.previewAudioOn;
+                    this.elements.btnAudio.dataset.state = this.previewAudioOn ? 'on' : 'off';
+                    this.elements.btnAudio.textContent = this.previewAudioOn ? '🔈 Audio: On' : '🔈 Audio: Off';
+                    if (this.audioGain) {
+                        this.audioGain.gain.value = this.previewAudioOn ? 1.0 : 0.0;
+                    }
+                    if (this.previewAudioOn) {
+                        this.audioNextTime = 0;
+                    }
+                    this.sendCommand(this.previewAudioOn ? 'preview_audio_on' : 'preview_audio_off', null);
+                });
+                this.elements.btnMute.addEventListener('click', () => {
+                    this.muteState = !this.muteState;
+                    this.elements.btnMute.dataset.state = this.muteState ? 'on' : 'off';
+                    this.elements.btnMute.textContent = this.muteState
+                        ? '🔇 Output muted' : '🔊 Mute Output';
+                    this.elements.previewMutedBadge.hidden = !this.muteState;
+                    this.sendCommand(this.muteState ? 'mute' : 'unmute', null);
+                });
+                this.elements.btnBlur.addEventListener('click', () => {
+                    this.blurState = !this.blurState;
+                    this.elements.btnBlur.dataset.state = this.blurState ? 'on' : 'off';
+                    this.elements.btnBlur.textContent = this.blurState
+                        ? '⚫ Output blurred' : '⚫ Blur Output';
+                    this.sendCommand(this.blurState ? 'blur' : 'unblur', null);
+                });
             }
 
             formatBytes(bytes) {
@@ -537,8 +866,14 @@
                                 ${isConnected ? 'Receiving Media' : 'Source Disconnected'}
                             </span>
                         </div>
-                        <div class="uptime-display">
-                            Session Uptime: <span>${this.formatUptime(data.uptime_s || 0)}</span>
+                        <div class="header-right">
+                            <div class="action-buttons">
+                                <button class="btn-action" id="btnRefresh">&#x21BB; Refresh</button>
+                                <button class="btn-action btn-live-edge" id="btnLiveEdge">&#x26A1; Live Edge</button>
+                            </div>
+                            <div class="uptime-display">
+                                Session Uptime: <span>${this.formatUptime(data.uptime_s || 0)}</span>
+                            </div>
                         </div>
                     </div>
 
@@ -595,8 +930,16 @@
                                 <span class="stat-label">Catch-up Engine</span>
                                 <span class="stat-value">
                                     ${data.catchup_active
-                        ? '<span class="badge badge-warning">Active (' + data.catchup_drift_ms + ' ms)</span>'
-                        : '<span class="badge badge-neutral">Idle</span>'}
+                        ? `<span class="badge badge-warning">${data.catchup_state} · ${data.catchup_drift_ms} ms</span>`
+                        : data.catchup_state && data.catchup_state !== 'Normal'
+                            ? `<span class="badge badge-neutral">${data.catchup_state}</span>`
+                            : '<span class="badge badge-neutral">Idle</span>'}
+                                </span>
+                            </div>
+                            <div class="stat-card">
+                                <span class="stat-label">Tempo</span>
+                                <span class="stat-value ${(data.catchup_tempo || 1) > 1.01 ? 'color-warning' : ''}">
+                                    ${(data.catchup_tempo || 1).toFixed(3)} <span class="stat-unit">x</span>
                                 </span>
                             </div>
                             <div class="stat-card">

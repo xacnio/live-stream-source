@@ -451,9 +451,11 @@ void WhepClient::on_audio_frame(const uint8_t *data, size_t len, uint64_t ts) {
 // Stub (no libdatachannel)
 
 bool WhepClient::start(const std::string &whep_url,
-                       const std::string &bearer_token) {
+                       const std::string &bearer_token,
+                       WhepMode mode) {
   (void)whep_url;
   (void)bearer_token;
+  (void)mode;
   lss_log_error("[WHEP Client] libdatachannel not available  - "
                 "WHEP support disabled. Rebuild with HAS_LIBDATACHANNEL.");
   return false;

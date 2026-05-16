@@ -35,8 +35,16 @@ int StreamDemuxer::open(const std::string &url, StreamType type) {
   fmt_ctx_->interrupt_callback.opaque = this;
 
   bool is_srt = (url.rfind("srt://", 0) == 0);
-  // NOBUFFER for everything except HLS/IVS (segment buffering needed).
-  // SRT MUST have NOBUFFER or av_read_frame stalls.
+  bool is_rtmp = (url.rfind("rtmp://", 0) == 0 ||
+                  url.rfind("rtmps://", 0) == 0);
+  // NOBUFFER: deliver packets immediately without internal buffering.
+  // Required for SRT (own jitter buffer) and now also for RTMP: FLV
+  // uses the same TCP transport with NOBUFFER and works fine. The old
+  // concern ("TCP hiccup = glitch") is addressed by the raised RTMP
+  // freeze threshold (2000ms) — normal TCP burst gaps (200-800ms) no
+  // longer trigger false-positive recovery. Without NOBUFFER, FFmpeg
+  // holds packets in an internal buffer adding ~100-300ms latency that
+  // accumulates as drift during burst delivery.
   if (!is_hls && !is_ivs) {
     fmt_ctx_->flags |= AVFMT_FLAG_NOBUFFER;
   }
@@ -48,13 +56,28 @@ int StreamDemuxer::open(const std::string &url, StreamType type) {
   fmt_ctx_->max_analyze_duration = ANALYZE_DURATION_US;
 
   AVDictionary *opts = nullptr;
+  // tcp_nodelay disables Nagle's algorithm — sends data immediately
+  // without coalescing small writes. Critical for ALL protocols
+  // including RTMP: the old exclusion was based on the incorrect
+  // assumption that OUR socket's Nagle setting affects the SERVER's
+  // packet sizes (it doesn't — each side controls its own socket).
+  // With Nagle ON, our RTMP acknowledgement messages were delayed
+  // by up to 200ms, starving the server's TCP flow control and
+  // causing it to throttle data delivery during high-bitrate bursts.
   av_dict_set(&opts, "tcp_nodelay", "1", 0);
-  av_dict_set(&opts, "rw_timeout", "5000000", 0);
+  av_dict_set(&opts, "rw_timeout", "1000000", 0); // Reduced to 1s to prevent UI freeze on stop
 
   if (is_srt) {
     av_dict_set(&opts, "fflags", "nobuffer+genpts", 0);
   } else if (is_hls || is_ivs) {
     av_dict_set(&opts, "fflags", "discardcorrupt", 0);
+  } else if (is_rtmp) {
+    // RTMP: nobuffer for lowest latency (matches FLV path — same TCP
+    // transport). flush_packets forces immediate packet delivery instead
+    // of waiting for interleave. genpts generates monotonic PTS from
+    // burst arrivals where TCP can deliver multiple packets at once
+    // with identical wall-clock arrival times.
+    av_dict_set(&opts, "fflags", "nobuffer+discardcorrupt+flush_packets+genpts", 0);
   } else {
     av_dict_set(&opts, "fflags", "nobuffer+discardcorrupt", 0);
   }
@@ -70,7 +93,7 @@ int StreamDemuxer::open(const std::string &url, StreamType type) {
     av_dict_set(&opts, "reconnect_delay_max", "2", 0);
     av_dict_set(&opts, "http_seekable", "0", 0);
     av_dict_set(&opts, "seg_max_retry", "8", 0);
-    av_dict_set(&opts, "rw_timeout", "5000000", 0);
+    av_dict_set(&opts, "rw_timeout", "2000000", 0); // 2s for IVS/HLS is safer
     av_dict_set(&opts, "allowed_extensions", "m3u8,ts,aac,mp4,m4s,key", 0);
     av_dict_set(&opts, "user_agent",
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -98,9 +121,24 @@ int StreamDemuxer::open(const std::string &url, StreamType type) {
     fmt_ctx_->max_analyze_duration = 3000000;        // 3s
     lss_log_debug("Protocol: HLS");
 
-  } else if (url.rfind("rtmp://", 0) == 0 || url.rfind("rtmps://", 0) == 0) {
+  } else if (is_rtmp) {
     av_dict_set(&opts, "rtmp_live", "live", 0);
     av_dict_set(&opts, "rtmp_buffer", "0", 0);
+    // 8 MB TCP socket receive buffer — for 10+ Mbps RTMP the OS-level
+    // default (~256KB) fills up faster than the worker drains it
+    // during bursts. 8MB ≈ 6s of stream at 10 Mbps.
+    av_dict_set(&opts, "recv_buffer_size", "8388608", 0);
+    // 128KB send buffer — we only send small RTMP ACK/control msgs,
+    // but the OS default is often 8KB which can delay ACKs under load.
+    av_dict_set(&opts, "send_buffer_size", "131072", 0);
+    // max_delay=0 eliminates FFmpeg's internal interleave delay.
+    // RTMP already delivers interleaved audio/video in wire order;
+    // additional buffering for interleaving just adds latency.
+    fmt_ctx_->max_delay = 0;
+    // RTMP FLV header delivers codec info immediately — smaller probe
+    // for faster startup. 1MB is enough for 10+ Mbps streams.
+    fmt_ctx_->probesize = 1024 * 1024;            // 1 MB
+    fmt_ctx_->max_analyze_duration = 1000000;     // 1s
     lss_log_debug("Protocol: RTMP");
 
   } else if (url.rfind("srt://", 0) == 0) {
