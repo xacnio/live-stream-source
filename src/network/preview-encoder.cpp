@@ -201,7 +201,7 @@ bool PreviewEncoder::encode_audio_pcm(const uint8_t *const *src_data,
 
   uint8_t *out_planes[1] = {out.data() + data_offset};
   int produced = swr_convert(swr_ctx_, out_planes, max_out,
-                              src_data, src_samples);
+                              const_cast<const uint8_t **>(src_data), src_samples);
   if (produced <= 0) {
     out.resize(tag_offset);
     return false;

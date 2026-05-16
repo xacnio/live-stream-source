@@ -80,7 +80,8 @@ bool BufferManager::should_skip_to_live() const
 	if (should_skip) {
 		lss_log_warn("BufferManager: Drift too large for catch-up, should skip to live "
 		             "(drift=%lld ms, threshold=%lld ms)",
-		             state_.drift_from_live_ms, MAX_DRIFT_FOR_CATCHUP_MS);
+		             (long long)state_.drift_from_live_ms,
+		             (long long)MAX_DRIFT_FOR_CATCHUP_MS);
 	}
 
 	return should_skip;
