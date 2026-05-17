@@ -2439,24 +2439,22 @@ bool LiveStreamSource::on_open_stats_clicked(obs_properties_t *,
   ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 #elif __APPLE__
   std::thread([url]() {
-    // operator
     std::string cmd = "open '" + url + "'";
     system(cmd.c_str());
   }).detach();
 #else
   std::thread([url]() {
-    // operator
     std::string cmd = "xdg-open '" + url + "'";
     system(cmd.c_str());
   }).detach();
 #endif
-  return true;
+  return false;
 }
 
 bool LiveStreamSource::on_show_window_stats_clicked(obs_properties_t *,
                                                     obs_property_t *, void *) {
   PluginDialog::show_instance();
-  return true;
+  return false;
 }
 
 struct AddOverlayTaskData {
@@ -2558,7 +2556,7 @@ bool LiveStreamSource::on_add_overlay_horz_clicked(obs_properties_t *,
   obs_queue_task(OBS_TASK_UI, add_overlay_browser_source_task, task_data,
                  false);
 
-  return true;
+  return false;
 }
 
 bool LiveStreamSource::on_add_overlay_vert_clicked(obs_properties_t *,
@@ -2585,7 +2583,7 @@ bool LiveStreamSource::on_add_overlay_vert_clicked(obs_properties_t *,
   obs_queue_task(OBS_TASK_UI, add_overlay_browser_source_task, task_data,
                  false);
 
-  return true;
+  return false;
 }
 
 bool LiveStreamSource::on_refresh_clicked(obs_properties_t *, obs_property_t *,
@@ -2599,7 +2597,7 @@ bool LiveStreamSource::on_refresh_clicked(obs_properties_t *, obs_property_t *,
 
   obs_source_update(self->obs_source_, nullptr);
 
-  return true;
+  return false;
 }
 
 bool LiveStreamSource::on_skip_to_live_clicked(obs_properties_t *,
