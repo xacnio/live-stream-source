@@ -243,7 +243,13 @@ private:
   // bandwidth and CPU encoding a feed nobody is watching yet.
   std::atomic<bool> preview_video_enabled_{false};
   std::atomic<bool> preview_audio_enabled_{false};
-  std::vector<uint8_t> blur_scratch_y_, blur_scratch_u_, blur_scratch_v_;
+  // Blur via 1/8 scale-down + scale-up (cheap swscale, no custom kernel).
+  struct SwsContext *blur_sws_down_ = nullptr;
+  struct SwsContext *blur_sws_up_   = nullptr;
+  int blur_cached_w_   = 0;
+  int blur_cached_h_   = 0;
+  int blur_cached_fmt_ = -1; // AVPixelFormat
+  std::vector<uint8_t> blur_small_buf_; // tiny intermediate I420 frame
   void handle_dashboard_command(const std::string &json_cmd);
   void send_preview_video(const AVFrame *frame);
   void send_preview_audio(const DecodedAudioFrame &af);

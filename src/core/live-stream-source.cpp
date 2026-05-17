@@ -106,6 +106,8 @@ LiveStreamSource::~LiveStreamSource() {
     WsStatsServer::instance().remove_source(name);
   }
   WsStatsServer::instance().release();
+  if (blur_sws_down_) { sws_freeContext(blur_sws_down_); blur_sws_down_ = nullptr; }
+  if (blur_sws_up_)   { sws_freeContext(blur_sws_up_);   blur_sws_up_   = nullptr; }
 }
 
 void LiveStreamSource::update(obs_data_t *settings) {
@@ -675,140 +677,98 @@ void LiveStreamSource::send_preview_audio(const DecodedAudioFrame &af) {
   }
 }
 
-namespace {
-// O(w×h) separable box-blur pass (horizontal then vertical).
-// Running-sum algorithm — cost is independent of radius r.
-// Three consecutive calls approximate a Gaussian with σ ≈ r pixels.
-static void box_blur_pass(uint8_t *plane, int w, int h, int stride, int r,
-                          std::vector<uint8_t> &tmp) {
-  const int diam = 2 * r + 1;
-  if ((int)tmp.size() < std::max(w, h)) tmp.resize(std::max(w, h));
-
-  // Horizontal pass (row-major, cache-friendly)
-  for (int y = 0; y < h; y++) {
-    uint8_t *row = plane + (ptrdiff_t)y * stride;
-    int sum = row[0] * (r + 1);
-    for (int k = 1; k <= r; k++) sum += row[k < w ? k : w - 1];
-    for (int x = 0; x < w; x++) {
-      tmp[x] = (uint8_t)(sum / diam);
-      sum += row[x + r + 1 < w ? x + r + 1 : w - 1];
-      sum -= row[x - r     > 0 ? x - r     : 0    ];
-    }
-    memcpy(row, tmp.data(), w);
-  }
-
-  // Vertical pass (column-major)
-  for (int x = 0; x < w; x++) {
-    int sum = plane[x] * (r + 1);
-    for (int k = 1; k <= r; k++) {
-      int yi = k < h ? k : h - 1;
-      sum += plane[(ptrdiff_t)yi * stride + x];
-    }
-    for (int y = 0; y < h; y++) {
-      tmp[y] = (uint8_t)(sum / diam);
-      int ay = y + r + 1 < h ? y + r + 1 : h - 1;
-      int sy = y - r     > 0 ? y - r     : 0;
-      sum += plane[(ptrdiff_t)ay * stride + x];
-      sum -= plane[(ptrdiff_t)sy * stride + x];
-    }
-    for (int y = 0; y < h; y++)
-      plane[(ptrdiff_t)y * stride + x] = tmp[y];
-  }
-}
-} // namespace
-
-// Heavy Gaussian-approximation privacy blur.
-// Three box-blur passes with r = min(w,h)/8 give σ ≈ 135px on 1080p.
-// Every feature smaller than ~405px (3σ) — text, faces, objects — becomes
-// an indistinguishable coloured smear.
+// Privacy pixelate: aggressive ~1/16 downscale (box-area average) → upscale
+// with nearest-neighbour, producing crisp ~16-px pixelation blocks. Output
+// is always I420 so OBS never hits an NV12/I444 alignment edge case.
 void LiveStreamSource::apply_blur_inplace(obs_source_frame2 &obs_frame,
                                            video_format obs_fmt,
                                            AVFrame *frame) {
-  if (obs_fmt != VIDEO_FORMAT_I420 && obs_fmt != VIDEO_FORMAT_I444 &&
-      obs_fmt != VIDEO_FORMAT_NV12)
-    return;
+  AVPixelFormat in_avfmt;
+  if      (obs_fmt == VIDEO_FORMAT_I420) in_avfmt = AV_PIX_FMT_YUV420P;
+  else if (obs_fmt == VIDEO_FORMAT_I444) in_avfmt = AV_PIX_FMT_YUV444P;
+  else if (obs_fmt == VIDEO_FORMAT_NV12) in_avfmt = AV_PIX_FMT_NV12;
+  else return;
 
   const int w = frame->width;
   const int h = frame->height;
   if (w <= 0 || h <= 0 || !obs_frame.data[0]) return;
+  if ((w & 1) || (h & 1)) return; // YUV420P needs even dims
 
-  const int ly = (int)obs_frame.linesize[0];
-  const int r  = std::max(30, std::min(w, h) / 8);
+  // Aggressive scale-down: ~1/32, rounded up to a multiple of 16 so the
+  // intermediate YUV420P stride/height stay well-aligned. At 1080p this
+  // yields a 64×36 grid (~30 px blocks) — large headlines, faces, and
+  // logos all disappear into solid colour squares.
+  auto align16_up = [](int v) { return (v + 15) & ~15; };
+  const int sw = std::max(32, align16_up(w / 32));
+  const int sh = std::max(32, align16_up(h / 32));
 
-  // Copy Y plane into scratch (never overwrite AVFrame / decoder memory).
-  const size_t y_size = (size_t)ly * h;
-  if (trans_y_buf_.size() < y_size) trans_y_buf_.resize(y_size);
-  memcpy(trans_y_buf_.data(), obs_frame.data[0], y_size);
-
-  std::vector<uint8_t> tmp; // row/column scratch reused by box_blur_pass
-
-  if (obs_fmt == VIDEO_FORMAT_NV12) {
-    // NV12 UV is interleaved (UVUV…). Split → blur each channel → merge.
-    const int luv  = (int)obs_frame.linesize[1];
-    const int nv_w = w / 2;
-    const int nv_h = h / 2;
-
-    if (blur_scratch_u_.size() < (size_t)nv_w * nv_h)
-      blur_scratch_u_.resize(nv_w * nv_h);
-    if (blur_scratch_v_.size() < (size_t)nv_w * nv_h)
-      blur_scratch_v_.resize(nv_w * nv_h);
-
-    for (int y = 0; y < nv_h; y++) {
-      const uint8_t *src = obs_frame.data[1] + (ptrdiff_t)y * luv;
-      uint8_t *U = blur_scratch_u_.data() + (ptrdiff_t)y * nv_w;
-      uint8_t *V = blur_scratch_v_.data() + (ptrdiff_t)y * nv_w;
-      for (int x = 0; x < nv_w; x++) { U[x] = src[2 * x]; V[x] = src[2 * x + 1]; }
+  if (!blur_sws_down_ || !blur_sws_up_ || blur_cached_w_ != w ||
+      blur_cached_h_ != h || blur_cached_fmt_ != (int)in_avfmt) {
+    if (blur_sws_down_) { sws_freeContext(blur_sws_down_); blur_sws_down_ = nullptr; }
+    if (blur_sws_up_)   { sws_freeContext(blur_sws_up_);   blur_sws_up_   = nullptr; }
+    // SWS_AREA = box-area averaging (proper down-sample, no aliasing).
+    // SWS_POINT = nearest-neighbour (gives the crisp pixel-block look).
+    blur_sws_down_ = sws_getContext(w, h, in_avfmt, sw, sh, AV_PIX_FMT_YUV420P,
+                                    SWS_AREA, nullptr, nullptr, nullptr);
+    blur_sws_up_   = sws_getContext(sw, sh, AV_PIX_FMT_YUV420P, w, h,
+                                    AV_PIX_FMT_YUV420P,
+                                    SWS_POINT, nullptr, nullptr, nullptr);
+    if (!blur_sws_down_ || !blur_sws_up_) {
+      if (blur_sws_down_) { sws_freeContext(blur_sws_down_); blur_sws_down_ = nullptr; }
+      if (blur_sws_up_)   { sws_freeContext(blur_sws_up_);   blur_sws_up_   = nullptr; }
+      return;
     }
-
-    const int uv_r = r / 2;
-    for (int pass = 0; pass < 3; pass++) {
-      box_blur_pass(trans_y_buf_.data(),    w,    h,    ly,   r,    tmp);
-      box_blur_pass(blur_scratch_u_.data(), nv_w, nv_h, nv_w, uv_r, tmp);
-      box_blur_pass(blur_scratch_v_.data(), nv_w, nv_h, nv_w, uv_r, tmp);
-    }
-
-    const size_t nv_size = (size_t)luv * nv_h;
-    if (trans_u_buf_.size() < nv_size) trans_u_buf_.resize(nv_size);
-    for (int y = 0; y < nv_h; y++) {
-      const uint8_t *U = blur_scratch_u_.data() + (ptrdiff_t)y * nv_w;
-      const uint8_t *V = blur_scratch_v_.data() + (ptrdiff_t)y * nv_w;
-      uint8_t *dst = trans_u_buf_.data() + (ptrdiff_t)y * luv;
-      for (int x = 0; x < nv_w; x++) { dst[2 * x] = U[x]; dst[2 * x + 1] = V[x]; }
-    }
-
-    obs_frame.data[0] = trans_y_buf_.data();
-    obs_frame.data[1] = trans_u_buf_.data();
-    obs_frame.linesize[0] = (uint32_t)ly;
-    obs_frame.linesize[1] = (uint32_t)luv;
-
-  } else {
-    // I420 / I444
-    const int lu   = (int)obs_frame.linesize[1];
-    const int lv   = (int)obs_frame.linesize[2];
-    const int uv_w = (obs_fmt == VIDEO_FORMAT_I420) ? w / 2 : w;
-    const int uv_h = (obs_fmt == VIDEO_FORMAT_I420) ? h / 2 : h;
-    const int uv_r = (obs_fmt == VIDEO_FORMAT_I420) ? r / 2 : r;
-
-    const size_t u_size = (size_t)lu * uv_h;
-    const size_t v_size = (size_t)lv * uv_h;
-    if (trans_u_buf_.size() < u_size) trans_u_buf_.resize(u_size);
-    if (trans_v_buf_.size() < v_size) trans_v_buf_.resize(v_size);
-    memcpy(trans_u_buf_.data(), obs_frame.data[1], u_size);
-    memcpy(trans_v_buf_.data(), obs_frame.data[2], v_size);
-
-    for (int pass = 0; pass < 3; pass++) {
-      box_blur_pass(trans_y_buf_.data(), w,    h,    ly, r,    tmp);
-      box_blur_pass(trans_u_buf_.data(), uv_w, uv_h, lu, uv_r, tmp);
-      box_blur_pass(trans_v_buf_.data(), uv_w, uv_h, lv, uv_r, tmp);
-    }
-
-    obs_frame.data[0] = trans_y_buf_.data();
-    obs_frame.data[1] = trans_u_buf_.data();
-    obs_frame.data[2] = trans_v_buf_.data();
-    obs_frame.linesize[0] = (uint32_t)ly;
-    obs_frame.linesize[1] = (uint32_t)lu;
-    obs_frame.linesize[2] = (uint32_t)lv;
+    blur_cached_w_   = w;
+    blur_cached_h_   = h;
+    blur_cached_fmt_ = (int)in_avfmt;
   }
+
+  // Intermediate tiny YUV420P buffer (Y + U + V, contiguous).
+  const int suv_w = sw / 2;
+  const int suv_h = sh / 2;
+  const size_t small_total =
+      (size_t)sw * sh + (size_t)suv_w * suv_h * 2;
+  if (blur_small_buf_.size() < small_total) blur_small_buf_.resize(small_total);
+  uint8_t *sy = blur_small_buf_.data();
+  uint8_t *su = sy + (size_t)sw * sh;
+  uint8_t *sv = su + (size_t)suv_w * suv_h;
+
+  // Downscale full-res (input format) → tiny YUV420P.
+  const uint8_t *dsrc[4] = {obs_frame.data[0], obs_frame.data[1],
+                              obs_frame.data[2], nullptr};
+  int dsrls[4] = {(int)obs_frame.linesize[0], (int)obs_frame.linesize[1],
+                  (int)obs_frame.linesize[2], 0};
+  uint8_t *ddst[4] = {sy, su, sv, nullptr};
+  int ddls[4] = {sw, suv_w, suv_w, 0};
+  sws_scale(blur_sws_down_, dsrc, dsrls, 0, h, ddst, ddls);
+
+  // Upscale tiny → full-res YUV420P. Output stride = width (tight packing).
+  const int out_ly = w;
+  const int out_lu = w / 2;
+  const int out_lv = w / 2;
+  const size_t y_size  = (size_t)out_ly * h;
+  const size_t uv_size = (size_t)out_lu * (h / 2);
+  if (trans_y_buf_.size() < y_size)  trans_y_buf_.resize(y_size);
+  if (trans_u_buf_.size() < uv_size) trans_u_buf_.resize(uv_size);
+  if (trans_v_buf_.size() < uv_size) trans_v_buf_.resize(uv_size);
+
+  const uint8_t *usrc[4] = {sy, su, sv, nullptr};
+  int ulsz[4] = {sw, suv_w, suv_w, 0};
+  uint8_t *udst[4] = {trans_y_buf_.data(), trans_u_buf_.data(),
+                       trans_v_buf_.data(), nullptr};
+  int udls[4] = {out_ly, out_lu, out_lv, 0};
+  sws_scale(blur_sws_up_, usrc, ulsz, 0, sh, udst, udls);
+
+  // Republish obs_frame as I420 regardless of the source format. OBS
+  // accepts a per-frame format change; this avoids any NV12 / I444
+  // alignment quirks in the downstream renderer.
+  obs_frame.format = VIDEO_FORMAT_I420;
+  obs_frame.data[0] = trans_y_buf_.data();
+  obs_frame.data[1] = trans_u_buf_.data();
+  obs_frame.data[2] = trans_v_buf_.data();
+  obs_frame.linesize[0] = (uint32_t)out_ly;
+  obs_frame.linesize[1] = (uint32_t)out_lu;
+  obs_frame.linesize[2] = (uint32_t)out_lv;
 }
 
 // Burn a small "muted speaker" mark into the bottom-right corner of the Y
