@@ -22,10 +22,14 @@ namespace lss {
 static video_format convert_pixel_format(AVPixelFormat func) {
   switch (func) {
   case AV_PIX_FMT_YUV420P:
-  case AV_PIX_FMT_YUVJ420P: // Corrected J420P -> YUVJ420P
+  case AV_PIX_FMT_YUVJ420P:
     return VIDEO_FORMAT_I420;
   case AV_PIX_FMT_NV12:
     return VIDEO_FORMAT_NV12;
+  case AV_PIX_FMT_P010LE:
+    return VIDEO_FORMAT_P010;
+  case AV_PIX_FMT_YUV420P10LE:
+    return VIDEO_FORMAT_I010;
   case AV_PIX_FMT_YUYV422:
     return VIDEO_FORMAT_YUY2;
   case AV_PIX_FMT_UYVY422:
@@ -35,7 +39,7 @@ static video_format convert_pixel_format(AVPixelFormat func) {
   case AV_PIX_FMT_YUV444P:
     return VIDEO_FORMAT_I444;
   default:
-    return VIDEO_FORMAT_NONE; // Ensure fallback
+    return VIDEO_FORMAT_NONE;
   }
 }
 
