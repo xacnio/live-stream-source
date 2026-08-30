@@ -311,6 +311,7 @@ set(PLUGIN_SOURCES
     src/protocols/whep/whep-client.cpp
     src/core/plugin-settings.cpp
     src/ui/dashboard-dialog.cpp
+    src/ui/update-checker.cpp
 )
 
 set(PLUGIN_HEADERS
@@ -334,6 +335,7 @@ set(PLUGIN_HEADERS
     src/protocols/whep/whep-client.h
     src/core/plugin-settings.h
     src/ui/dashboard-dialog.h
+    src/ui/update-checker.h
 )
 
 add_library(${PROJECT_NAME} MODULE ${PLUGIN_SOURCES} ${PLUGIN_HEADERS})

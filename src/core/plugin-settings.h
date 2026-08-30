@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
 #include <QLabel>
@@ -31,6 +32,7 @@ private slots:
 private:
   QLineEdit *portEdit;
   QComboBox *interfaceCombo;
+  QCheckBox *updateCheckBox;
   QLabel *statusLabel;
   QTimer *refreshTimer;
 };

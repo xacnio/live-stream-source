@@ -1,6 +1,7 @@
 #include "core/plugin-settings.h"
 #include "network/ws-stats-server.h"
 #include "ui/dashboard-dialog.h"
+#include "ui/update-checker.h"
 #include <obs-frontend-api.h>
 #include <string>
 #include <util/config-file.h>
@@ -86,6 +87,11 @@ SettingsWidget::SettingsWidget(QWidget *parent) : QWidget(parent) {
   formLayout->addRow(QString::fromUtf8(obs_module_text("WsInterface")),
                      interfaceCombo);
 
+  updateCheckBox =
+      new QCheckBox(QString::fromUtf8(obs_module_text("UpdateOnStartup")));
+  updateCheckBox->setChecked(update_check_on_startup_enabled());
+  formLayout->addRow(QString(), updateCheckBox);
+
   statusLabel = new QLabel();
   refreshStatus();
 
@@ -125,6 +131,7 @@ void SettingsWidget::saveSettings() {
 
   std::string ip = interfaceCombo->currentData().toString().toStdString();
   save_config(p, ip);
+  set_update_check_on_startup(updateCheckBox->isChecked());
 }
 
 AboutWidget::AboutWidget(QWidget *parent) : QWidget(parent) {
@@ -146,8 +153,16 @@ AboutWidget::AboutWidget(QWidget *parent) : QWidget(parent) {
   desc->setWordWrap(true);
   desc->setOpenExternalLinks(true);
 
+  QPushButton *updateBtn =
+      new QPushButton(QString::fromUtf8(obs_module_text("UpdateCheckBtn")));
+  updateBtn->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
+  connect(updateBtn, &QPushButton::clicked, this,
+          []() { check_for_updates(false); });
+
   layout->addWidget(title);
   layout->addWidget(desc);
+  layout->addSpacing(10);
+  layout->addWidget(updateBtn);
   layout->addStretch();
 }
 
