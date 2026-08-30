@@ -26,13 +26,15 @@ cmake -G "Unix Makefiles" \
   -DCMAKE_BUILD_TYPE=Release \
   -DENABLE_BROWSER=OFF \
   -DENABLE_PLUGINS=OFF \
-  -DENABLE_UI=OFF \
+  -DENABLE_FRONTEND=OFF \
   -DENABLE_SCRIPTING=OFF \
   -DQT_VERSION=6 \
   -DCMAKE_INSTALL_PREFIX="/tmp/obs-studio-installed" \
   /tmp/obs-studio-src
 
-# Only build the frontend API and core to avoid UI dependency issues
+# ENABLE_FRONTEND=OFF (renamed from ENABLE_UI in OBS 32.2) returns before the UI
+# is configured; frontend/api is added ahead of that gate, so obs-frontend-api
+# still builds without Qt or nlohmann_json.
 cmake --build . --config Release --parallel 4 -t obs-frontend-api
 
 # Manually copy the compiled libraries to the expected directory
