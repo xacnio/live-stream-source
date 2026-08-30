@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-OBS_VERSION="32.0.4"
+OBS_VERSION="32.2.2"
 
 echo "Installing Linux Dependencies for OBS Plugin..."
 

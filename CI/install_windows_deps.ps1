@@ -1,6 +1,6 @@
 param(
-    [string]$ObsVersion = "32.0.4",
-    [string]$DepsVersion = "2025-08-23"
+    [string]$ObsVersion = "32.2.2",
+    [string]$DepsVersion = "2026-08-26"
 )
 
 Write-Host "Installing Windows Dependencies for OBS Plugin..."

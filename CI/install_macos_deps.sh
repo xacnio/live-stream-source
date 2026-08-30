@@ -11,8 +11,8 @@ if [ -z "$MAC_DEPS_ARCH" ] || [ -z "$MAC_QT6_ARCH" ] || [ -z "$MAC_ARCH" ]; then
     exit 1
 fi
 
-OBS_VERSION="32.0.4"
-DEPS_VERSION="2025-08-23"
+OBS_VERSION="32.2.2"
+DEPS_VERSION="2026-08-26"
 
 echo "Installing macOS Dependencies for OBS Plugin (Arch: $MAC_ARCH, Deps: $MAC_DEPS_ARCH, Qt6: $MAC_QT6_ARCH)..."
 
