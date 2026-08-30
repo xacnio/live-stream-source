@@ -158,7 +158,13 @@ void LiveStreamSource::update(obs_data_t *settings) {
 
   bitrate_mon_.set_threshold_kbps(low_bitrate_kbps_);
 
-  prev_disconnected_.store(!connected_.load());
+  int grace = static_cast<int>(obs_data_get_int(settings, PROP_DISCONNECT_GRACE));
+  if (grace < MIN_DISCONNECT_GRACE_MS)
+    grace = MIN_DISCONNECT_GRACE_MS;
+  if (grace > MAX_DISCONNECT_GRACE_MS)
+    grace = MAX_DISCONNECT_GRACE_MS;
+  disconnect_grace_ms_.store(grace);
+
   prev_low_bitrate_.store(!bitrate_mon_.is_low());
 
   bool needs_restart = is_refresh || url_changed || hw_changed ||
@@ -1504,7 +1510,6 @@ void LiveStreamSource::worker_thread_func() {
             catchup_first_wall_ms_ = 0;
             catchup_first_pts_ms_ = 0;
             // Hide disconnect source on successful reconnect
-            prev_disconnected_.store(true); // Force re-evaluation
             update_source_toggles();
           } else {
             reconnect_mgr_.mark_failed();
@@ -1991,9 +1996,15 @@ void LiveStreamSource::start_stream() {
   demuxer_.reset_abort();
   stats_last_write_ms_ = now_ms();
   stream_start_time_ = std::chrono::steady_clock::now();
-  prev_disconnected_.store(false);
   prev_low_bitrate_.store(false);
   last_low_bitrate_time_ms_.store(0);
+  {
+    std::lock_guard<std::mutex> lock(toggle_mutex_);
+    disconnect_overlay_.reset(false, now_ms());
+    loading_overlay_.reset(false, now_ms());
+    prev_disconnected_shown_ = false;
+    prev_loading_shown_ = false;
+  }
 
   if (stream_type_ == StreamType::AmazonIVS ||
       stream_type_ == StreamType::HLS) {
@@ -2004,13 +2015,12 @@ void LiveStreamSource::start_stream() {
     toggle_source_visibility(low_bitrate_src_name_, false);
   if (!disconnect_src_name_.empty())
     toggle_source_visibility(disconnect_src_name_, false);
-  if (!loading_src_name_.empty())
-    toggle_source_visibility(loading_src_name_, false);
-  prev_loading_.store(false);
-
+  // No grace period on start — nothing is playing yet.
   if (!loading_src_name_.empty()) {
     toggle_source_visibility(loading_src_name_, true);
-    prev_loading_.store(true);
+    std::lock_guard<std::mutex> lock(toggle_mutex_);
+    loading_overlay_.reset(true, now_ms());
+    prev_loading_shown_ = true;
   }
 
   write_stats_json();
@@ -2081,7 +2091,11 @@ void LiveStreamSource::stop_stream() {
 
   if (!loading_src_name_.empty())
     toggle_source_visibility(loading_src_name_, false);
-  prev_loading_.store(false);
+  {
+    std::lock_guard<std::mutex> lock(toggle_mutex_);
+    loading_overlay_.reset(false, now_ms());
+    prev_loading_shown_ = false;
+  }
   lss_log_debug("stop_stream: done");
 }
 
@@ -2198,6 +2212,9 @@ void LiveStreamSource::video_tick(float seconds) {
 }
 
 void LiveStreamSource::update_source_toggles() {
+  // Called from both the worker and shimmer threads — serialize.
+  std::lock_guard<std::mutex> lock(toggle_mutex_);
+
   bool connected = connected_.load();
   bool is_currently_low = bitrate_mon_.is_low();
   bool was_showing = prev_low_bitrate_.load();
@@ -2236,32 +2253,38 @@ void LiveStreamSource::update_source_toggles() {
   int attempts = reconnect_mgr_.get_attempts();
   bool first_frame = first_frame_received_.load();
 
-  bool dis_now = false;
-  bool loading_now = false;
+  bool dis_raw = false;
+  bool loading_raw = false;
 
   // 1. We are connected but buffering (no frame yet)
   bool buffering = connected && !first_frame;
-  
+
   // 2. Initial grace period: only at the very beginning (no frames ever received)
   bool initial_connecting = !ever_frame && (attempts <= 2);
 
-  lss_log_debug("[TOGGLE] State: connected=%d first_frame=%d ever_frame=%d attempts=%d buffering=%d initial=%d",
-                connected, first_frame, ever_frame, attempts, buffering, initial_connecting);
-
   if (buffering) {
     // Connected but waiting for first frame - show loading
-    loading_now = true;
+    loading_raw = true;
   } else if (initial_connecting) {
     // Initial connection attempts - show loading
-    loading_now = true;
+    loading_raw = true;
   } else if (!connected) {
     // Disconnected after receiving frames - show disconnect
-    dis_now = true;
+    dis_raw = true;
   }
 
-  lss_log_debug("[TOGGLE] Decision: loading_now=%d dis_now=%d", loading_now, dis_now);
+  // Hysteresis — the raw states above bounce every second or two on a bad
+  // connection, and each flip would strobe an overlay and queue a UI task.
+  const int64_t grace = disconnect_grace_ms_.load();
+  bool dis_now =
+      disconnect_overlay_.step(dis_raw, now, grace, DISCONNECT_MIN_VISIBLE_MS);
 
-  bool dis_showing = prev_disconnected_.load();
+  // Loading stays down while disconnect is up, so a reconnect that fails
+  // again doesn't ping-pong between the two.
+  bool loading_now = loading_overlay_.step(loading_raw && !dis_now, now, grace,
+                                           LOADING_MIN_VISIBLE_MS);
+
+  bool dis_showing = prev_disconnected_shown_;
   if (dis_now != dis_showing) {
     lss_log_info("[TOGGLE] Disconnect state changed: connected=%d dis_now=%d "
                   "dis_showing=%d ever_frame=%d attempts=%d src='%s'",
@@ -2271,29 +2294,20 @@ void LiveStreamSource::update_source_toggles() {
     if (dis_now)
       obs_source_output_video2(obs_source_, nullptr);
 
-    if (!disconnect_src_name_.empty()) {
+    if (!disconnect_src_name_.empty())
       toggle_source_visibility(disconnect_src_name_, dis_now);
-      lss_log_debug("[TOGGLE] Disconnect source '%s' -> %s",
-                    disconnect_src_name_.c_str(),
-                    dis_now ? "VISIBLE" : "HIDDEN");
-    }
-    prev_disconnected_.store(dis_now);
+    prev_disconnected_shown_ = dis_now;
   }
 
-  bool loading_was = prev_loading_.load();
-  if (loading_now != loading_was) {
+  if (loading_now != prev_loading_shown_) {
     lss_log_debug(
-        "[TOGGLE] Loading state changed: loading_now=%d loading_was=%d "
-        "connected=%d first_frame=%d ever_frame=%d src='%s'",
-        loading_now, loading_was, connected, first_frame_received_.load(),
-        ever_received_frame_.load(), loading_src_name_.c_str());
-    if (!loading_src_name_.empty()) {
+        "[TOGGLE] Loading state changed: loading_now=%d connected=%d "
+        "first_frame=%d ever_frame=%d src='%s'",
+        loading_now, connected, first_frame, ever_frame,
+        loading_src_name_.c_str());
+    if (!loading_src_name_.empty())
       toggle_source_visibility(loading_src_name_, loading_now);
-      lss_log_debug("[TOGGLE] Loading source '%s' -> %s",
-                    loading_src_name_.c_str(),
-                    loading_now ? "VISIBLE" : "HIDDEN");
-    }
-    prev_loading_.store(loading_now);
+    prev_loading_shown_ = loading_now;
   }
 }
 
@@ -2770,6 +2784,13 @@ obs_properties_t *LiveStreamSource::get_properties(void *data) {
     populate_source_list(ld, self->obs_source_);
   }
 
+  obs_property_t *grace = obs_properties_add_int(
+      props, PROP_DISCONNECT_GRACE, obs_module_text("DisconnectGrace"),
+      MIN_DISCONNECT_GRACE_MS, MAX_DISCONNECT_GRACE_MS, 100);
+  obs_property_int_set_suffix(grace, " ms");
+  obs_property_set_long_description(grace,
+                                    obs_module_text("DisconnectGrace.Desc"));
+
   obs_properties_add_button(props, PROP_OPEN_STATS,
                             obs_module_text("OpenStatsDash"),
                             on_open_stats_clicked);
@@ -2797,6 +2818,8 @@ void LiveStreamSource::get_defaults(obs_data_t *settings) {
   obs_data_set_default_bool(settings, PROP_AUTO_CATCHUP, true);
   obs_data_set_default_bool(settings, PROP_HW_DECODE, true);
   obs_data_set_default_bool(settings, PROP_SHOW_SHIMMER, true);
+  obs_data_set_default_int(settings, PROP_DISCONNECT_GRACE,
+                           DEFAULT_DISCONNECT_GRACE_MS);
   obs_data_set_default_int(settings, PROP_WHEP_MODE,
                            static_cast<int>(WhepClient::WhepMode::Auto));
 }

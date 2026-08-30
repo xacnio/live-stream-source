@@ -23,6 +23,47 @@
 
 namespace lss {
 
+// Debounced on/off state for an overlay source. Callers serialize writes on
+// toggle_mutex_; atomics only so the state is readable from other threads.
+struct OverlayDebouncer {
+  std::atomic<bool> raw{false};           // last observed condition
+  std::atomic<int64_t> raw_since_ms{0};   // when `raw` last changed
+  std::atomic<bool> shown{false};         // debounced output
+  std::atomic<int64_t> shown_since_ms{0}; // when `shown` last changed
+
+  void reset(bool state, int64_t now) {
+    raw.store(state);
+    raw_since_ms.store(now);
+    shown.store(state);
+    shown_since_ms.store(now);
+  }
+
+  // Feeds the raw condition, returns the debounced state. `cond` must hold
+  // show_delay_ms to switch on; "on" is held min_visible_ms before going off.
+  bool step(bool cond, int64_t now, int64_t show_delay_ms,
+            int64_t min_visible_ms) {
+    if (cond != raw.load()) {
+      raw.store(cond);
+      raw_since_ms.store(now);
+    }
+
+    const bool cur = shown.load();
+    if (cond == cur)
+      return cur;
+
+    if (cond) {
+      if ((now - raw_since_ms.load()) < show_delay_ms)
+        return cur; // blip — too short to bother showing
+    } else if ((now - shown_since_ms.load()) < min_visible_ms) {
+      return cur; // recovered, but hold the minimum
+    }
+
+    shown.store(cond);
+    shown_since_ms.store(now);
+    return cond;
+  }
+};
+
 class LiveStreamSource {
 public:
   LiveStreamSource(obs_source_t *source, obs_data_t *settings);
@@ -142,10 +183,18 @@ private:
 
 
   std::atomic<bool> prev_low_bitrate_{false};
-  std::atomic<bool> prev_disconnected_{true};
-  std::atomic<bool> prev_loading_{false};
   std::atomic<int64_t> last_low_bitrate_time_ms_{0};
   std::atomic<int64_t> last_connect_ms_{0};
+
+  // Overlay visibility state. update_source_toggles() runs from both the
+  // worker and the shimmer thread, so the whole state machine is serialized.
+  std::mutex toggle_mutex_;
+  OverlayDebouncer disconnect_overlay_;
+  OverlayDebouncer loading_overlay_;
+  // Last state pushed to the scene items — only queue a UI task on a change.
+  bool prev_disconnected_shown_ = false;
+  bool prev_loading_shown_ = false;
+  std::atomic<int> disconnect_grace_ms_{DEFAULT_DISCONNECT_GRACE_MS};
 
   // Statistics
   std::atomic<int64_t> total_frames_decoded_{0};

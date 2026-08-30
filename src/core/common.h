@@ -215,6 +215,15 @@ constexpr int RECONNECT_MAX_ATTEMPTS = 10;
 constexpr int OVERLAY_FONT_SIZE = 32;
 constexpr int OVERLAY_PADDING = 10;
 
+// Overlay hysteresis: an overlay only appears once its condition has held
+// for the grace period, then stays up for a minimum time. Keeps a flapping
+// connection from strobing the overlays. See OverlayDebouncer.
+constexpr int DEFAULT_DISCONNECT_GRACE_MS = 1500;
+constexpr int MIN_DISCONNECT_GRACE_MS = 0;
+constexpr int MAX_DISCONNECT_GRACE_MS = 60000;
+constexpr int64_t DISCONNECT_MIN_VISIBLE_MS = 3000;
+constexpr int64_t LOADING_MIN_VISIBLE_MS = 1000;
+
 // Source ID
 constexpr const char *SOURCE_ID = "live_stream_source";
 constexpr const char *SOURCE_NAME = "Live Stream Source";
@@ -240,6 +249,7 @@ constexpr const char *PROP_HW_DECODE = "hw_decode";
 constexpr const char *PROP_LOW_BITRATE_SOURCE = "low_bitrate_source_name";
 constexpr const char *PROP_DISCONNECT_SOURCE = "disconnect_source_name";
 constexpr const char *PROP_LOADING_SOURCE = "loading_source_name";
+constexpr const char *PROP_DISCONNECT_GRACE = "disconnect_grace_ms";
 constexpr const char *PROP_SHOW_SHIMMER = "show_shimmer";
 constexpr const char *PROP_STATS_PATH_INFO = "stats_path_info";
 constexpr const char *PROP_OPEN_STATS = "open_stats";
