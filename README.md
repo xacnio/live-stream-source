@@ -34,6 +34,20 @@ Play live streams (RTMP, FLV, SRT, HLS, IVS, WHEP) directly in OBS Studio. Built
 
 Download the latest release for your platform from [Releases](https://github.com/xacnio/live-stream-source/releases).
 
+### OBS Version
+
+**Requires OBS Studio 32.2.0 or newer.** OBS 32.2 moved to FFmpeg 8, changing the
+library ABI, so a single build cannot cover both generations.
+
+| Your OBS | Plugin version |
+| -------- | -------------- |
+| 32.2.0 and newer | 1.3.0 and newer |
+| 32.1.x and older | 1.2.2 |
+
+Installing the wrong pair makes OBS report *"The following OBS plugins failed to
+load"* on startup — the plugin is looking for FFmpeg libraries your OBS does not
+ship.
+
 ### Windows
 
 **Installer (Recommended):**
