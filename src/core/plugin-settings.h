@@ -5,6 +5,7 @@
 #include <QDialog>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPushButton>
 #include <QTabWidget>
 #include <QTimer>
 #include <QWidget>
@@ -18,6 +19,7 @@ void show_plugin_settings();
 void load_and_apply_config();
 int get_plugin_port();
 std::string get_plugin_bind_ip();
+std::string get_plugin_page_token();
 
 class SettingsWidget : public QWidget {
   Q_OBJECT
@@ -32,6 +34,8 @@ private slots:
 private:
   QLineEdit *portEdit;
   QComboBox *interfaceCombo;
+  QLineEdit *accessKeyEdit;
+  QPushButton *copyKeyBtn;
   QCheckBox *updateCheckBox;
   QLabel *statusLabel;
   QTimer *refreshTimer;

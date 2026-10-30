@@ -45,6 +45,8 @@ private:
   int video_idx_ = -1;
   int audio_idx_ = -1;
   std::atomic<bool> abort_{false};
+  std::atomic<int64_t> open_deadline_ms_{0};
+  static constexpr int64_t OPEN_DEADLINE_MS = 5000;
 
   std::unique_ptr<LLHlsClient> llhls_client_;
   AVIOContext *custom_avio_ctx_ = nullptr;

@@ -22,7 +22,10 @@ struct DecodedAudioFrame {
   uint32_t frames = 0; // number of audio frames (samples per channel)
   int channels = 0;
   int sample_rate = 0;
-  int64_t pts_us = 0;
+  int64_t pts_us = 0;   // media position of the first sample
+  double tempo = 1.0;   // time-stretch ratio these samples were produced at
+  // First chunk after a stretcher join: its media position is only approximate.
+  bool after_transition = false;
 
   void free_buffers();
 };

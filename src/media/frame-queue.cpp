@@ -24,6 +24,8 @@ void DecodedAudioFrame::free_buffers() {
   channels = 0;
   sample_rate = 0;
   pts_us = 0;
+  tempo = 1.0;
+  after_transition = false;
 }
 
 

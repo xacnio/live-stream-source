@@ -6,6 +6,7 @@
 #include "media/audio-time-stretcher.h"
 
 #include <atomic>
+#include <vector>
 
 extern "C" {
 #include <libavfilter/avfilter.h>
@@ -38,17 +39,24 @@ public:
   void set_tempo(double tempo);
   double current_tempo() const { return current_tempo_; }
 
-  // Get reference to the AudioTimeStretcher for orchestrator
-  AudioTimeStretcher& get_stretcher() { return stretcher_; }
-
   // Drain remaining samples from the time-stretcher into the queue.
   // Call before transitioning back to passthrough so SoundTouch's
   // internal buffer doesn't vanish as a gap/pop.
   void drain_stretcher(AudioFrameQueue &queue);
 
+  // Ends the current run of audio cleanly: the stretcher tail, or a short
+  // mirrored fade-out when passing through. Without it a stall stops the
+  // waveform dead and the jump to silence is an audible click.
+  void finish_segment(AudioFrameQueue &queue);
+
 private:
   void push_resampled(AVFrame *frame, AudioFrameQueue &queue);
   bool apply_pending_tempo(AudioFrameQueue &queue);
+  void push_planar(const float *left, const float *right, int samples,
+                   int64_t pts_us, double tempo, AudioFrameQueue &queue);
+  int64_t next_pts_us() const;
+  int fade_samples() const { return out_rate_ / 200; }      // 5 ms
+  int crossfade_samples() const { return out_rate_ / 100; } // 10 ms
 
   AVCodecContext *codec_ctx_ = nullptr;
   SwrContext *swr_ctx_ = nullptr;
@@ -61,6 +69,7 @@ private:
   // flushed audio at a wildly wrong OBS timestamp.
   int64_t last_pushed_pts_us_ = 0;
   uint32_t last_pushed_frames_ = 0;
+  double last_pushed_tempo_ = 1.0;
   int consecutive_errors_ = 0;
   static constexpr int ERROR_THRESHOLD = 3;
   AVRational stream_tb_ = {1, 1000}; // stream time base, default to ms
@@ -71,7 +80,23 @@ private:
   double current_tempo_ = 1.0;
   bool stretcher_initialized_ = false;
 
-  
+  enum class StretchState {
+    Passthrough, // SoundTouch out of the path
+    Warming,     // fed in parallel, output not used yet
+    Stretching,
+    Exiting,     // next chunk crossfades back to raw audio
+  };
+  StretchState stretch_state_ = StretchState::Passthrough;
+  int warm_samples_ = 0;
+  // Chunks still settling after a join, while SoundTouch's leftovers clear.
+  int transition_chunks_ = 0;
+  static constexpr int TRANSITION_CHUNKS = 4;
+
+  // Most recent output samples (planar), mirrored by finish_segment().
+  std::vector<float> tail_[2];
+  int tail_samples_ = 0;
+
+
   // Fallback to atempo filter if SoundTouch fails
   bool use_fallback_atempo_ = false;
   AVFilterGraph *filter_graph_ = nullptr;

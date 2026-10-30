@@ -3,24 +3,62 @@
 #include "ui/dashboard-dialog.h"
 #include "ui/update-checker.h"
 #include <obs-frontend-api.h>
+#include <obs-module.h>
 #include <string>
+#include <util/bmem.h>
 #include <util/config-file.h>
+#include <util/platform.h>
 
+#include <QClipboard>
 #include <QFormLayout>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QIntValidator>
 #include <QLabel>
 #include <QNetworkInterface>
 #include <QPushButton>
+#include <QRandomGenerator>
 #include <QVBoxLayout>
 
 namespace lss {
 
 static int g_port = 4477;
 static std::string g_bind_ip = "127.0.0.1";
+static std::string g_access_key;
 
 int get_plugin_port() { return g_port; }
 std::string get_plugin_bind_ip() { return g_bind_ip; }
+
+static QString generate_access_key();
+
+// Written into the pages this plugin puts on disk, which a web site can't read. Kept in
+// a file so a browser source that loads before the plugin has rewritten them still works.
+std::string get_plugin_page_token() {
+  static std::string token;
+  if (!token.empty())
+    return token;
+
+  char *path = obs_module_config_path("page-token");
+  if (path) {
+    if (char *saved = os_quick_read_utf8_file(path)) {
+      token = saved;
+      bfree(saved);
+    }
+  }
+  if (token.size() < 40) {
+    token = generate_access_key().toStdString();
+    if (path) {
+      char *folder = obs_module_config_path("");
+      if (folder) {
+        os_mkdirs(folder);
+        bfree(folder);
+      }
+      os_quick_write_utf8_file(path, token.c_str(), token.size(), false);
+    }
+  }
+  bfree(path);
+  return token;
+}
 
 void load_and_apply_config() {
   config_t *cfg = obs_frontend_get_profile_config();
@@ -37,23 +75,38 @@ void load_and_apply_config() {
       bool bind_any = config_get_bool(cfg, "LSSServer", "BindAny");
       g_bind_ip = bind_any ? "0.0.0.0" : "127.0.0.1";
     }
+
+    const char *saved_key = config_get_string(cfg, "LSSServer", "AccessKey");
+    g_access_key = saved_key ? saved_key : "";
   } else {
     g_port = 4477;
     g_bind_ip = "127.0.0.1";
+    g_access_key.clear();
   }
-  WsStatsServer::instance().configure(g_port, g_bind_ip);
+  WsStatsServer::instance().configure(g_port, g_bind_ip, g_access_key);
 }
 
-static void save_config(int port, const std::string &bind_ip) {
+static void save_config(int port, const std::string &bind_ip,
+                        const std::string &access_key) {
   config_t *cfg = obs_frontend_get_profile_config();
   if (cfg) {
     config_set_uint(cfg, "LSSServer", "Port", port);
     config_set_string(cfg, "LSSServer", "BindIP", bind_ip.c_str());
+    config_set_string(cfg, "LSSServer", "AccessKey", access_key.c_str());
     config_save(cfg);
   }
   g_port = port;
   g_bind_ip = bind_ip;
-  WsStatsServer::instance().configure(g_port, g_bind_ip);
+  g_access_key = access_key;
+  WsStatsServer::instance().configure(g_port, g_bind_ip, g_access_key);
+}
+
+static QString generate_access_key() {
+  static const char hex[] = "0123456789abcdef";
+  QString key;
+  for (int i = 0; i < 40; ++i)
+    key.append(QLatin1Char(hex[QRandomGenerator::system()->bounded(16)]));
+  return key;
 }
 
 SettingsWidget::SettingsWidget(QWidget *parent) : QWidget(parent) {
@@ -87,6 +140,26 @@ SettingsWidget::SettingsWidget(QWidget *parent) : QWidget(parent) {
   formLayout->addRow(QString::fromUtf8(obs_module_text("WsInterface")),
                      interfaceCombo);
 
+  // Read-only on purpose: every key comes from the generator, so none of them
+  // can be short or guessable.
+  accessKeyEdit = new QLineEdit(QString::fromStdString(g_access_key));
+  accessKeyEdit->setEchoMode(QLineEdit::Password);
+  accessKeyEdit->setReadOnly(true);
+  QPushButton *generateBtn =
+      new QPushButton(QString::fromUtf8(obs_module_text("WsGenerateKey")));
+  connect(generateBtn, &QPushButton::clicked, this, [this]() {
+    accessKeyEdit->setText(generate_access_key());
+  });
+  copyKeyBtn = new QPushButton(QString::fromUtf8(obs_module_text("WsCopyKey")));
+  connect(copyKeyBtn, &QPushButton::clicked, this, [this]() {
+    QGuiApplication::clipboard()->setText(accessKeyEdit->text());
+  });
+  QHBoxLayout *keyRow = new QHBoxLayout();
+  keyRow->addWidget(accessKeyEdit);
+  keyRow->addWidget(generateBtn);
+  keyRow->addWidget(copyKeyBtn);
+  formLayout->addRow(QString::fromUtf8(obs_module_text("WsAccessKey")), keyRow);
+
   updateCheckBox =
       new QCheckBox(QString::fromUtf8(obs_module_text("UpdateOnStartup")));
   updateCheckBox->setChecked(update_check_on_startup_enabled());
@@ -119,6 +192,12 @@ void SettingsWidget::refreshStatus() {
                 .arg(QString::fromUtf8(obs_module_text("WsStopped")))
                 .arg(QString::fromUtf8(obs_module_text("WsRequiresSource")));
 
+  // Reachable from other machines with nothing protecting it.
+  const QString bind = interfaceCombo->currentData().toString();
+  if (bind != "127.0.0.1" && accessKeyEdit->text().isEmpty())
+    statusMsg += QString("<br><span style='color:#e8a33d;'>%1</span>")
+                     .arg(QString::fromUtf8(obs_module_text("WsNoKeyWarning")));
+
   statusLabel->setText(
       QString("<b>%1</b> %2")
           .arg(QString::fromUtf8(obs_module_text("WsStatus")), statusMsg));
@@ -130,7 +209,7 @@ void SettingsWidget::saveSettings() {
     return;
 
   std::string ip = interfaceCombo->currentData().toString().toStdString();
-  save_config(p, ip);
+  save_config(p, ip, accessKeyEdit->text().toStdString());
   set_update_check_on_startup(updateCheckBox->isChecked());
 }
 
@@ -237,6 +316,7 @@ void PluginDialog::saveAndClose() {
 static void on_menu_action(void *) { PluginDialog::show_instance(); }
 
 void init_plugin_settings() {
+  WsStatsServer::instance().set_page_token(get_plugin_page_token());
   obs_frontend_add_tools_menu_item(obs_module_text("MenuDashboard"),
                                    on_menu_action, nullptr);
   load_and_apply_config();

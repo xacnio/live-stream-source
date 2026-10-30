@@ -11,7 +11,6 @@ StreamDemuxer::~StreamDemuxer() { close(); }
 
 int StreamDemuxer::open(const std::string &url, StreamType type) {
   close();
-  abort_.store(false);
 
   bool is_ivs = (type == StreamType::AmazonIVS);
   bool is_hls = (type == StreamType::HLS);
@@ -65,7 +64,11 @@ int StreamDemuxer::open(const std::string &url, StreamType type) {
   // by up to 200ms, starving the server's TCP flow control and
   // causing it to throttle data delivery during high-bitrate bursts.
   av_dict_set(&opts, "tcp_nodelay", "1", 0);
-  av_dict_set(&opts, "rw_timeout", "1000000", 0); // Reduced to 1s to prevent UI freeze on stop
+  // Long enough to ride out a stall: the playout engine holds the picture and
+  // recovers when data returns, while reconnecting would throw away whatever
+  // the server still has queued. Stop stays responsive through the interrupt
+  // callback, which doesn't depend on this timeout.
+  av_dict_set(&opts, "rw_timeout", "10000000", 0);
 
   if (is_srt) {
     av_dict_set(&opts, "fflags", "nobuffer+genpts", 0);
@@ -161,7 +164,12 @@ int StreamDemuxer::open(const std::string &url, StreamType type) {
     lss_log_debug("Protocol: HTTP/FLV");
   }
 
+  // rw_timeout is long to survive stalls, so a server that accepts the
+  // connection and then says nothing needs a limit of its own.
+  if (!is_hls && !is_ivs)
+    open_deadline_ms_.store(now_ms() + OPEN_DEADLINE_MS);
   int ret = avformat_open_input(&fmt_ctx_, url.c_str(), nullptr, &opts);
+  open_deadline_ms_.store(0);
   av_dict_free(&opts);
 
   if (ret < 0) {
@@ -172,7 +180,10 @@ int StreamDemuxer::open(const std::string &url, StreamType type) {
     return ret;
   }
 
+  if (!is_hls && !is_ivs)
+    open_deadline_ms_.store(now_ms() + OPEN_DEADLINE_MS);
   ret = avformat_find_stream_info(fmt_ctx_, nullptr);
+  open_deadline_ms_.store(0);
   if (ret < 0) {
     lss_log_error("avformat_find_stream_info failed: %d", ret);
     close();
@@ -197,7 +208,7 @@ int StreamDemuxer::open(const std::string &url, StreamType type) {
           av_find_best_stream(fmt_ctx_, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
     }
   } else {
-    lss_log_warn("No video stream found in %s", url.c_str());
+    lss_log_warn("No video stream found in %s", url_for_log(url).c_str());
     audio_idx_ =
         av_find_best_stream(fmt_ctx_, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
   }
@@ -241,7 +252,7 @@ int StreamDemuxer::open(const std::string &url, StreamType type) {
 }
 
 int StreamDemuxer::open_ivs(const std::string &url) {
-  lss_log_info("[IVS] Attempting custom LL-HLS client for: %s", url.c_str());
+  lss_log_info("[IVS] Attempting custom LL-HLS client for: %s", url_for_log(url).c_str());
 
   llhls_client_ = std::make_unique<LLHlsClient>();
   if (!llhls_client_->start(url)) {
@@ -462,7 +473,10 @@ void StreamDemuxer::reset_abort() { abort_.store(false); }
 
 int StreamDemuxer::interrupt_callback(void *opaque) {
   auto *self = static_cast<StreamDemuxer *>(opaque);
-  return self->abort_.load() ? 1 : 0;
+  if (self->abort_.load())
+    return 1;
+  const int64_t deadline = self->open_deadline_ms_.load();
+  return (deadline > 0 && now_ms() > deadline) ? 1 : 0;
 }
 
 AVCodecParameters *StreamDemuxer::video_codecpar() const {

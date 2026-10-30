@@ -42,7 +42,7 @@ bool WhepClient::start(const std::string &whep_url,
   bearer_token_ = bearer_token;
   running_.store(true);
 
-  lss_log_info("[WHEP Client] Starting  - URL: %s (Mode: %d)", whep_url.c_str(),
+  lss_log_info("[WHEP Client] Starting  - URL: %s (Mode: %d)", url_for_log(whep_url).c_str(),
                (int)mode);
 
   if (mode == WhepMode::Auto) {

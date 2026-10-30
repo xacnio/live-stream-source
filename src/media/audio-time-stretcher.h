@@ -72,6 +72,9 @@ public:
   // Call when seeking or starting a new stream.
   void reset();
 
+  // Input samples (per channel) fed but not yet processed.
+  int buffered_input_samples() const;
+
 private:
   soundtouch::SoundTouch *st_;
   int sample_rate_;
