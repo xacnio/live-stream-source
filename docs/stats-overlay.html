@@ -326,6 +326,13 @@
                     return;
                 }
 
+                // The plugin fills in its token when it writes this page to disk.
+                const pageToken = '__LSS_PAGE_TOKEN__';
+                this.socket.onopen = () => {
+                    if (!pageToken.startsWith('__'))
+                        this.socket.send(JSON.stringify({ auth: pageToken }));
+                };
+
                 this.socket.onmessage = (event) => {
                     try {
                         const payload = JSON.parse(event.data);
