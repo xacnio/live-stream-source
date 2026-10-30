@@ -24,6 +24,8 @@ namespace lss {
 class PreviewEncoder {
 public:
   PreviewEncoder() = default;
+  PreviewEncoder(int width, int height, int jpeg_quality)
+      : width_(width), height_(height), jpeg_quality_(jpeg_quality) {}
   ~PreviewEncoder();
 
   PreviewEncoder(const PreviewEncoder &) = delete;
@@ -56,6 +58,10 @@ public:
   static constexpr int AUDIO_OUT_CH   = 1;
 
 private:
+  int width_ = PREVIEW_WIDTH;
+  int height_ = PREVIEW_HEIGHT;
+  int jpeg_quality_ = PREVIEW_JPEG_QUALITY;
+
   // Video state
   AVCodecContext *jpeg_ctx_ = nullptr;
   SwsContext     *sws_ctx_  = nullptr;

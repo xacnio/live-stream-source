@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!-- Live Stream Source fills in the text, colour and size. Everything in rem follows the size setting. -->
+<style>
+* { box-sizing: border-box; margin: 0; }
+html, body { width: 100vw; height: 100vh; overflow: hidden; background: transparent; }
+html { font-size: calc(1vh * {{scale}} / 100); }
+body { display: grid; place-items: center; color: {{color}}; font-family: "Segoe UI", Roboto, Arial, sans-serif; }
+body { place-items: start end; padding: 3rem; }
+.box { display: flex; align-items: flex-end; gap: 1.8rem; padding: 1.6rem 2.4rem; border-radius: 1.8rem; background: rgba(12,14,19,.8); font-size: 2.8rem; font-weight: 700; }
+.bars { display: flex; align-items: flex-end; gap: .6rem; height: 4rem; }
+.bars i { width: 1rem; background: rgba(255,255,255,.22); border-radius: .3rem; }
+.bars i:nth-child(1) { height: 30%; background: #f2b13c; animation: flick 1.2s infinite; }
+.bars i:nth-child(2) { height: 55%; background: #f2b13c; animation: flick 1.2s .2s infinite; }
+.bars i:nth-child(3) { height: 80%; }
+.bars i:nth-child(4) { height: 100%; }
+@keyframes flick { 50% { opacity: .3; } }
+</style>
+</head>
+<body>
+<div class="box"><div class="bars"><i></i><i></i><i></i><i></i></div>{{text}}</div>
+</body>
+</html>

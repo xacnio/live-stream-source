@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(live-stream-source VERSION 1.3.0 LANGUAGES C CXX)
+project(live-stream-source VERSION 1.4.0 LANGUAGES C CXX)
 
 get_filename_component(_cmake_cxx_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
 
@@ -292,7 +292,7 @@ add_custom_command(
 set(PLUGIN_SOURCES
     src/core/plugin-main.cpp
     src/core/live-stream-source.cpp
-    src/core/catchup-orchestrator.cpp
+    src/core/live-stream-playout.cpp
     src/media/stream-demuxer.cpp
     src/media/video-decoder.cpp
     src/media/audio-decoder.cpp
@@ -300,10 +300,13 @@ set(PLUGIN_SOURCES
     src/media/frame-queue.cpp
     src/utils/bitrate-monitor.cpp
     src/utils/reconnect-manager.cpp
-    src/utils/buffer-manager.cpp
-    src/utils/tempo-ramper.cpp
+    src/playout/packet-buffer.cpp
+    src/playout/recovery-policy.cpp
+    src/playout/sound-match.cpp
     src/network/ws-stats-server.cpp
     src/network/preview-encoder.cpp
+    src/media/privacy-blur.cpp
+    src/network/program-preview.cpp
     src/protocols/ll-hls/ll-hls-parser.cpp
     src/protocols/ll-hls/ll-hls-fetcher.cpp
     src/protocols/ll-hls/ll-hls-client.cpp
@@ -312,13 +315,25 @@ set(PLUGIN_SOURCES
     src/core/plugin-settings.cpp
     src/ui/dashboard-dialog.cpp
     src/ui/update-checker.cpp
+    src/ui/sync-notice.cpp
+    src/ui/obs-remote.cpp
+    src/ui/audio-meters.cpp
+    src/ui/sync-panel.cpp
+    src/ui/fallback-dialog.cpp
+    src/ui/context-buttons.cpp
+    src/ui/url-field-guard.cpp
+    src/core/fallback-layer.cpp
 )
 
 set(PLUGIN_HEADERS
     ${CMAKE_CURRENT_BINARY_DIR}/html-assets.h
     src/core/plugin-main.h
     src/core/live-stream-source.h
-    src/core/catchup-orchestrator.h
+    src/playout/packet-buffer.h
+    src/playout/playout-clock.h
+    src/playout/recovery-policy.h
+    src/playout/sync-registry.h
+    src/playout/sound-match.h
     src/media/stream-demuxer.h
     src/media/video-decoder.h
     src/media/audio-decoder.h
@@ -326,7 +341,10 @@ set(PLUGIN_HEADERS
     src/utils/bitrate-monitor.h
     src/utils/reconnect-manager.h
     src/network/ws-stats-server.h
+    src/network/ws-protocol.h
     src/network/preview-encoder.h
+    src/media/privacy-blur.h
+    src/network/program-preview.h
     src/core/common.h
     src/protocols/ll-hls/ll-hls-parser.h
     src/protocols/ll-hls/ll-hls-fetcher.h
@@ -336,6 +354,17 @@ set(PLUGIN_HEADERS
     src/core/plugin-settings.h
     src/ui/dashboard-dialog.h
     src/ui/update-checker.h
+    src/ui/sync-notice.h
+    src/ui/obs-remote.h
+    src/ui/audio-meters.h
+    src/ui/sync-panel.h
+    src/ui/fallback-dialog.h
+    src/ui/context-buttons.h
+    src/ui/url-field-guard.h
+    src/core/fallback-layer.h
+    src/core/fallback-fit.h
+    src/core/fallback-template.h
+    src/core/fallback-settings.h
 )
 
 add_library(${PROJECT_NAME} MODULE ${PLUGIN_SOURCES} ${PLUGIN_HEADERS})
@@ -481,6 +510,23 @@ if(WIN32)
 endif()
 
 # ──────────────────────────────────────────────────────────────
+# Tests (OBS-independent playout logic)
+# ──────────────────────────────────────────────────────────────
+option(LSS_BUILD_TESTS "Build unit tests" OFF)
+if(LSS_BUILD_TESTS)
+    add_executable(playout-logic-test
+        tests/playout-logic-test.cpp
+        src/playout/packet-buffer.cpp
+        src/playout/recovery-policy.cpp
+        src/playout/sound-match.cpp
+        src/media/privacy-blur.cpp
+    )
+    target_include_directories(playout-logic-test PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(playout-logic-test PRIVATE ffmpeg::avcodec ffmpeg::avutil ffmpeg::swscale)
+
+endif()
+
+# ──────────────────────────────────────────────────────────────
 # Install
 # ──────────────────────────────────────────────────────────────
 install(TARGETS ${PROJECT_NAME}
@@ -490,5 +536,8 @@ install(TARGETS ${PROJECT_NAME}
 
 install(DIRECTORY "data/locale/"
     DESTINATION "data/obs-plugins/${PROJECT_NAME}/locale"
+)
+install(DIRECTORY "data/fallback-templates/"
+    DESTINATION "data/obs-plugins/${PROJECT_NAME}/fallback-templates"
 )
 

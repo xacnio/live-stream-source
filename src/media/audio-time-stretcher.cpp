@@ -178,4 +178,8 @@ void AudioTimeStretcher::reset() {
                 latency_before, tempo_before);
 }
 
+int AudioTimeStretcher::buffered_input_samples() const {
+  return st_ ? static_cast<int>(st_->numUnprocessedSamples()) : 0;
+}
+
 } // namespace lss

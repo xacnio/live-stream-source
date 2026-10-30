@@ -175,30 +175,14 @@ void AudioDecoder::push_resampled(AVFrame *frame, AudioFrameQueue &queue) {
 
   int64_t pts_us = (frame->pts != AV_NOPTS_VALUE)
                        ? av_rescale_q(frame->pts, stream_tb_, {1, 1000000})
-                       : now_us();
+                       : next_pts_us();
+
+  float *raw_left = reinterpret_cast<float *>(out_buf[0]);
+  float *raw_right = reinterpret_cast<float *>(out_buf[1]);
 
   // Fast path: tempo == 1.0 and no time-stretching — emit directly.
-  if (current_tempo_ == 1.0 && !use_fallback_atempo_) {
-    int bytes_per_sample = av_get_bytes_per_sample(AV_SAMPLE_FMT_FLTP);
-    int plane_size = out_samples * bytes_per_sample;
-    int total_bytes = out_samples * out_ch_ * bytes_per_sample;
-
-    DecodedAudioFrame af;
-    af.data = static_cast<uint8_t *>(av_malloc(total_bytes));
-    if (!af.data) {
-      av_freep(&out_buf[0]);
-      return;
-    }
-    for (int ch = 0; ch < out_ch_; ++ch) {
-      memcpy(af.data + ch * plane_size, out_buf[ch], plane_size);
-    }
-    af.frames = static_cast<uint32_t>(out_samples);
-    af.channels = out_ch_;
-    af.sample_rate = out_rate_;
-    af.pts_us = pts_us;
-    last_pushed_pts_us_ = af.pts_us;
-    last_pushed_frames_ = af.frames;
-    queue.push(std::move(af));
+  if (stretch_state_ == StretchState::Passthrough && !use_fallback_atempo_) {
+    push_planar(raw_left, raw_right, out_samples, pts_us, 1.0, queue);
     av_freep(&out_buf[0]);
     return;
   }
@@ -207,46 +191,99 @@ void AudioDecoder::push_resampled(AVFrame *frame, AudioFrameQueue &queue) {
   if (stretcher_initialized_ && !use_fallback_atempo_) {
     // Convert planar float to interleaved float for SoundTouch
     std::vector<float> interleaved(out_samples * out_ch_);
-    float *left = reinterpret_cast<float *>(out_buf[0]);
-    float *right = reinterpret_cast<float *>(out_buf[1]);
-    
     for (int i = 0; i < out_samples; ++i) {
-      interleaved[i * 2] = left[i];
-      interleaved[i * 2 + 1] = right[i];
+      interleaved[i * 2] = raw_left[i];
+      interleaved[i * 2 + 1] = raw_right[i];
     }
-    
+
     // Process through SoundTouch (output buffer large enough for worst case)
     std::vector<float> output(out_samples * 4 * out_ch_); // 4x for safety
-    int received = stretcher_.process(interleaved.data(), out_samples, 
-                                      output.data(), out_samples * 4);
-    
-    if (received > 0) {
-      // Convert interleaved back to planar
-      int bytes_per_sample = sizeof(float);
-      int plane_size = received * bytes_per_sample;
-      int total_bytes = received * out_ch_ * bytes_per_sample;
+    const int received = stretcher_.process(interleaved.data(), out_samples,
+                                            output.data(), out_samples * 4);
 
-      DecodedAudioFrame af;
-      af.data = static_cast<uint8_t *>(av_malloc(total_bytes));
-      if (af.data) {
-        float *out_left = reinterpret_cast<float *>(af.data);
-        float *out_right = reinterpret_cast<float *>(af.data + plane_size);
-
-        for (int i = 0; i < received; ++i) {
-          out_left[i] = output[i * 2];
-          out_right[i] = output[i * 2 + 1];
-        }
-
-        af.frames = static_cast<uint32_t>(received);
-        af.channels = out_ch_;
-        af.sample_rate = out_rate_;
-        af.pts_us = pts_us;
-        last_pushed_pts_us_ = af.pts_us;
-        last_pushed_frames_ = af.frames;
-        queue.push(std::move(af));
-      }
+    std::vector<float> left(received);
+    std::vector<float> right(received);
+    for (int i = 0; i < received; ++i) {
+      left[i] = output[i * 2];
+      right[i] = output[i * 2 + 1];
     }
-    
+
+    // Media position of the first emitted sample, measured back from the end
+    // of the input just fed. Tracking it this way instead of counting output
+    // samples can't accumulate error however long the stretch runs.
+    const double input_ahead =
+        stretcher_.buffered_input_samples() + received * current_tempo_;
+    const int64_t input_end_us = pts_us + (out_samples * 1000000LL) / out_rate_;
+    const int64_t stretched_pts_us =
+        input_end_us - static_cast<int64_t>(input_ahead * 1000000.0 / out_rate_);
+
+    const int crossfade = std::min({crossfade_samples(), received, out_samples});
+
+    switch (stretch_state_) {
+    case StretchState::Warming:
+      // SoundTouch needs a moment before its output is usable: it starts from
+      // silence and skips some input. Passthrough carries on until then.
+      warm_samples_ += out_samples;
+      if (warm_samples_ < out_rate_ / 10 || crossfade < crossfade_samples()) {
+        push_planar(raw_left, raw_right, out_samples, pts_us, 1.0, queue);
+        break;
+      }
+      for (int i = 0; i < crossfade; ++i) {
+        const float gain = static_cast<float>(i) / crossfade;
+        left[i] = left[i] * gain + raw_left[i] * (1.0f - gain);
+        right[i] = right[i] * gain + raw_right[i] * (1.0f - gain);
+      }
+      transition_chunks_ = TRANSITION_CHUNKS;
+      push_planar(left.data(), right.data(), received, stretched_pts_us,
+                  current_tempo_, queue);
+      stretch_state_ = StretchState::Stretching;
+      break;
+
+    case StretchState::Stretching:
+      if (received > 0)
+        push_planar(left.data(), right.data(), received, stretched_pts_us,
+                    current_tempo_, queue);
+      break;
+
+    case StretchState::Exiting: {
+      // SoundTouch emits in bursts. Joining on a short chunk would shrink the
+      // crossfade to nothing, so wait for one with enough output to fade from.
+      if (crossfade < crossfade_samples()) {
+        if (received > 0)
+          push_planar(left.data(), right.data(), received, stretched_pts_us,
+                      1.0, queue);
+        break;
+      }
+
+      // Drop back to the raw signal without flushing: SoundTouch's flush pads
+      // the end with silence, and that gap is what used to be audible.
+      std::vector<float> joined_left(left.begin(), left.end() - crossfade);
+      std::vector<float> joined_right(right.begin(), right.end() - crossfade);
+      for (int i = 0; i < crossfade; ++i) {
+        const float gain = static_cast<float>(i) / crossfade;
+        joined_left.push_back(left[received - crossfade + i] * (1.0f - gain) +
+                              raw_left[i] * gain);
+        joined_right.push_back(right[received - crossfade + i] * (1.0f - gain) +
+                               raw_right[i] * gain);
+      }
+      joined_left.insert(joined_left.end(), raw_left + crossfade,
+                         raw_left + out_samples);
+      joined_right.insert(joined_right.end(), raw_right + crossfade,
+                          raw_right + out_samples);
+
+      stretcher_.reset();
+      stretch_state_ = StretchState::Passthrough;
+      transition_chunks_ = TRANSITION_CHUNKS;
+      push_planar(joined_left.data(), joined_right.data(),
+                  static_cast<int>(joined_left.size()),
+                  received > 0 ? stretched_pts_us : pts_us, 1.0, queue);
+      break;
+    }
+
+    case StretchState::Passthrough:
+      break;
+    }
+
     av_freep(&out_buf[0]);
     return;
   }
@@ -369,48 +406,104 @@ void AudioDecoder::push_resampled(AVFrame *frame, AudioFrameQueue &queue) {
   av_freep(&out_buf[0]);
 }
 
+void AudioDecoder::push_planar(const float *left, const float *right, int samples,
+                               int64_t pts_us, double tempo,
+                               AudioFrameQueue &queue) {
+  if (samples <= 0)
+    return;
+
+  const int plane_size = samples * static_cast<int>(sizeof(float));
+  DecodedAudioFrame af;
+  af.data = static_cast<uint8_t *>(av_malloc(plane_size * out_ch_));
+  if (!af.data)
+    return;
+
+  memcpy(af.data, left, plane_size);
+  memcpy(af.data + plane_size, right, plane_size);
+  af.frames = static_cast<uint32_t>(samples);
+  af.channels = out_ch_;
+  af.sample_rate = out_rate_;
+  af.pts_us = pts_us;
+  af.tempo = tempo;
+  af.after_transition = transition_chunks_ > 0;
+  if (transition_chunks_ > 0)
+    --transition_chunks_;
+
+  last_pushed_pts_us_ = pts_us;
+  last_pushed_frames_ = af.frames;
+  last_pushed_tempo_ = tempo;
+
+  const int keep = std::min(samples, fade_samples());
+  tail_[0].assign(left + samples - keep, left + samples);
+  tail_[1].assign(right + samples - keep, right + samples);
+  tail_samples_ = keep;
+
+  queue.push(std::move(af));
+}
+
+// Flushes what SoundTouch still holds. Only for the end of a run: flush pads
+// with silence, so joining back into live audio goes through the crossfade.
 void AudioDecoder::drain_stretcher(AudioFrameQueue &queue) {
   if (!stretcher_initialized_ || use_fallback_atempo_)
     return;
 
   // Flush SoundTouch's internal buffer
   std::vector<float> output(8192 * out_ch_);
-  int received = stretcher_.flush(output.data(), 8192);
+  const int received = stretcher_.flush(output.data(), 8192);
 
   if (received > 0) {
-    // Convert interleaved back to planar
-    int bytes_per_sample = sizeof(float);
-    int plane_size = received * bytes_per_sample;
-    int total_bytes = received * out_ch_ * bytes_per_sample;
-
-    DecodedAudioFrame af;
-    af.data = static_cast<uint8_t *>(av_malloc(total_bytes));
-    if (af.data) {
-      float *out_left = reinterpret_cast<float *>(af.data);
-      float *out_right = reinterpret_cast<float *>(af.data + plane_size);
-
-      for (int i = 0; i < received; ++i) {
-        out_left[i] = output[i * 2];
-        out_right[i] = output[i * 2 + 1];
-      }
-
-      af.frames = static_cast<uint32_t>(received);
-      af.channels = out_ch_;
-      af.sample_rate = out_rate_;
-      // PTS continues right after the last pushed frame in stream-time
-      // domain. Using now_us() (wall clock) instead would be interpreted
-      // as a stream PTS downstream and produce a wildly wrong OBS timestamp.
-      if (last_pushed_pts_us_ > 0 && out_rate_ > 0) {
-        int64_t last_dur_us = (last_pushed_frames_ * 1000000LL) / out_rate_;
-        af.pts_us = last_pushed_pts_us_ + last_dur_us;
-      } else {
-        af.pts_us = now_us();
-      }
-      last_pushed_pts_us_ = af.pts_us;
-      last_pushed_frames_ = af.frames;
-      queue.push(std::move(af));
+    std::vector<float> left(received);
+    std::vector<float> right(received);
+    const int fade = std::min(received, fade_samples());
+    for (int i = 0; i < received; ++i) {
+      const float gain =
+          i >= received - fade ? static_cast<float>(received - i) / fade : 1.0f;
+      left[i] = output[i * 2] * gain;
+      right[i] = output[i * 2 + 1] * gain;
     }
+    push_planar(left.data(), right.data(), received, next_pts_us(),
+                last_pushed_tempo_, queue);
   }
+  tail_samples_ = 0;
+}
+
+// PTS continues right after the last pushed frame in stream-time domain.
+// Falling back to the wall clock here would be interpreted as a stream PTS
+// downstream and produce a wildly wrong OBS timestamp.
+int64_t AudioDecoder::next_pts_us() const {
+  if (last_pushed_frames_ == 0 || out_rate_ <= 0)
+    return last_pushed_pts_us_;
+  return last_pushed_pts_us_ +
+         static_cast<int64_t>(last_pushed_frames_ * 1000000.0 *
+                              last_pushed_tempo_ / out_rate_);
+}
+
+void AudioDecoder::finish_segment(AudioFrameQueue &queue) {
+  const bool stretched = stretch_state_ == StretchState::Stretching ||
+                         stretch_state_ == StretchState::Exiting;
+  if (stretched)
+    drain_stretcher(queue);
+  if (stretch_state_ != StretchState::Passthrough)
+    stretcher_.reset();
+  stretch_state_ = StretchState::Passthrough;
+  current_tempo_ = 1.0;
+  pending_tempo_.store(1.0);
+  transition_chunks_ = 0;
+
+  if (tail_samples_ <= 0)
+    return;
+
+  // Mirror the waveform at the join so there's no step, then fade to zero.
+  const int n = tail_samples_;
+  std::vector<float> left(n);
+  std::vector<float> right(n);
+  for (int i = 0; i < n; ++i) {
+    const float gain = static_cast<float>(n - i) / n;
+    left[i] = tail_[0][n - 1 - i] * gain;
+    right[i] = tail_[1][n - 1 - i] * gain;
+  }
+  push_planar(left.data(), right.data(), n, next_pts_us(), 1.0, queue);
+  tail_samples_ = 0;
 }
 
 void AudioDecoder::drain_filter(AudioFrameQueue &queue) {
@@ -476,13 +569,20 @@ bool AudioDecoder::apply_pending_tempo(AudioFrameQueue &queue) {
 
   // SoundTouch path
   if (stretcher_initialized_ && !use_fallback_atempo_) {
-    // When returning to 1.0x, drain SoundTouch's internal ~40ms of stretched
-    // samples INTO the queue instead of clearing them. The old reset() path
-    // called st_->clear() which discards those samples — that vanished chunk
-    // is what the user heard as a tiny pıt at the catchup exit. drain_stretcher
-    // flushes via st_->flush()+receiveSamples() so OBS receives every sample.
-    if (want == 1.0 && current_tempo_ > 1.001) {
-      drain_stretcher(queue);
+    // Entering and leaving go through a crossfade with the raw signal in
+    // push_resampled(), so the join never has a gap or a step in it.
+    if (want == 1.0) {
+      if (stretch_state_ == StretchState::Warming) {
+        stretcher_.reset();
+        stretch_state_ = StretchState::Passthrough;
+      } else if (stretch_state_ == StretchState::Stretching) {
+        stretch_state_ = StretchState::Exiting;
+      }
+    } else if (stretch_state_ == StretchState::Passthrough) {
+      stretch_state_ = StretchState::Warming;
+      warm_samples_ = 0;
+    } else if (stretch_state_ == StretchState::Exiting) {
+      stretch_state_ = StretchState::Stretching; // called back before the join
     }
     stretcher_.set_tempo(want);
     current_tempo_ = want;
@@ -639,6 +739,11 @@ void AudioDecoder::close() {
   current_tempo_ = 1.0;
   pending_tempo_.store(1.0);
   use_fallback_atempo_ = false;
+  stretch_state_ = StretchState::Passthrough;
+  tail_samples_ = 0;
+  transition_chunks_ = 0;
+  last_pushed_pts_us_ = 0;
+  last_pushed_frames_ = 0;
 }
 
 void AudioDecoder::reset_state() {
@@ -671,6 +776,9 @@ void AudioDecoder::reset_state() {
   teardown_filter_graph();
   current_tempo_ = 1.0;
   pending_tempo_.store(1.0);
+  stretch_state_ = StretchState::Passthrough;
+  tail_samples_ = 0;
+  transition_chunks_ = 0;
 
   consecutive_errors_ = 0;
   lss_log_debug("Audio decoder state reset");

@@ -186,8 +186,11 @@ void handle_result(bool silent, const QByteArray &body) {
 
   lss_log_info("Update available: %s (running %s)", qUtf8Printable(tag),
                PLUGIN_VERSION);
-  show_update_dialog(parent, tag, rel.value("html_url").toString(kReleasePage),
-                     rel.value("body").toString().trimmed(), silent);
+  // Opened in the browser on a click, so it has to be our own page.
+  QString page = rel.value("html_url").toString();
+  if (!page.startsWith(QString(kReleasePage).section("/releases/", 0, 0) + "/releases/"))
+    page = kReleasePage;
+  show_update_dialog(parent, tag, page, rel.value("body").toString().trimmed(), silent);
 }
 
 void on_frontend_event(enum obs_frontend_event event, void *) {

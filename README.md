@@ -15,9 +15,12 @@ Play live streams (RTMP, FLV, SRT, HLS, IVS, WHEP) directly in OBS Studio. Built
 
 - **Protocol Flexibility** — RTMP, RTMPS, SRT, HLS, IVS (LL-HLS), and WHEP.
 - **Hardware Acceleration** — NVDEC, QSV, DXVA2, and VideoToolbox.
-- **Catch-up Playback** — SoundTouch time-stretching keeps audio artifact-free when recovering from network drops. Triggers at 1 s drift, skips to live edge above 10 s.
+- **Dropout Recovery** — A jitter buffer rides out network hiccups. Under 2 s of delay, playback drifts back at up to 1.10x with pitch-corrected audio. Above that it cuts to a keyframe near the live edge, or keeps all content if you prefer. There is no visible fast-forward.
+- **Stable A/V Sync** — Audio drives one shared clock for both streams, so sync holds through stalls, cuts and reconnects on Standard streams.
+- **Remote Panel** — Switch scenes, start or stop the stream and adjust audio from your own panel, with program preview and audio meters. Anything other than a program on the same machine needs the access key.
+- **Stream Sync** — A dock for lining sources up: pick one main source and its followers, then let them follow its delay or keep fixed offsets. Sync Now lines them up on a clap or any sound they share. Changing a delay lands at once, up to 10 seconds in either direction.
 - **Auto-Reconnect** — Configurable retry on connection failure.
-- **Smart Fallbacks** — Switch to another OBS source on disconnect, low bitrate, or during initial buffering.
+- **Built-in Fallbacks** — Each source shows its own text card, image, video or web page when its stream drops, runs low or is loading, sized and placed inside the source, with its own font, colours, background and in/out animations. Nine HTML templates ship with the plugin. Nothing to add to the scene. A scene source can still be used instead.
 - **Real-time Metrics** — Bitrate, FPS, latency, and uptime via a browser dashboard, a Qt stats window, or a raw WebSocket feed.
 - **Live Preview Dashboard** — Low-bandwidth JPEG+PCM preview in the browser tab with remote mute, blur, and skip-to-live controls.
 
@@ -98,10 +101,8 @@ ship.
 | **Stream URL** | URL to the live stream |
 | **Stream Type** | Standard, Amazon IVS, HLS, or WHEP |
 | **Hardware Acceleration** | Enable GPU decoding |
-| **Low Bitrate Threshold** | Bitrate (kbps) below which the low-bitrate source is shown |
-| **Low Bitrate Overlay Source** | Source shown when bitrate drops below threshold |
-| **Disconnect Fallback Source** | Source shown when stream disconnects |
-| **Loading Overlay Source** | Source shown during initial connection |
+| **Low Bitrate Threshold** | Bitrate (kbps) below which the low-bitrate fallback is shown |
+| **Fallback Settings** | Opens a window with one tab each for disconnect, low bitrate and loading |
 | **WHEP Bearer Token** | Auth token for WHEP endpoints |
 
 ### Buttons
@@ -113,6 +114,8 @@ ship.
 | **Open Statistics Dashboard** | Opens the HTML stats dashboard in a browser |
 | **Show Statistics Window** | Opens the built-in Qt stats window |
 | **Add Stats Overlay** | Adds a browser source overlay to the current scene |
+
+Refresh and Skip to Live Edge also appear in the bar under the preview while the source is selected.
 
 ## WebSocket Stats Server
 
@@ -141,6 +144,7 @@ The plugin runs a WebSocket server on port `4477` (configurable via **Tools → 
       "catchup_state": "Normal",
       "catchup_tempo": 1.000,
       "catchup_drift_ms": 0,
+      "target_latency_ms": 500,
       "hw_accel": true,
       "video_codec": "h264",
       "audio_codec": "aac",
@@ -176,6 +180,8 @@ Send a JSON object to control a source:
 | `blur` / `unblur` | Toggle privacy blur on the preview |
 | `live_to_edge` | Skip to the live edge immediately |
 | `refresh` | Reconnect the stream |
+
+Browser pages have to send `{ "auth": "<access key>" }` first, even on the same machine. The dashboard and overlay pages the plugin writes to disk prove themselves with a local token. Programs on the same machine are let in without one, and connections from other machines need the access key.
 
 ## Building from Source
 
@@ -215,28 +221,52 @@ src/
 ├── core/
 │   ├── plugin-main.cpp/h          # Plugin entry point
 │   ├── live-stream-source.cpp/h   # Main source plugin
-│   ├── catchup-orchestrator.cpp/h # Catch-up state machine
+│   ├── live-stream-playout.cpp    # Playout engine threads (Standard streams)
 │   ├── plugin-settings.cpp/h      # Settings UI (Qt)
+│   ├── fallback-layer.cpp/h       # Fallbacks drawn by the source itself
+│   ├── fallback-fit.h             # Placement and animation maths
+│   ├── fallback-template.h        # Fills in the HTML templates
+│   ├── fallback-settings.h        # Fallback setting names
 │   └── common.h                   # Shared constants & types
 ├── media/
 │   ├── stream-demuxer.cpp/h       # FFmpeg stream demuxing
 │   ├── video-decoder.cpp/h        # Video decoding (SW/HW)
 │   ├── audio-decoder.cpp/h        # Audio decoding + time-stretching
 │   ├── audio-time-stretcher.cpp/h # SoundTouch wrapper
+│   ├── privacy-blur.cpp/h         # Gaussian privacy blur
 │   └── frame-queue.cpp/h          # Thread-safe frame queue
 ├── protocols/
 │   ├── ll-hls/                    # Amazon IVS LL-HLS client
 │   └── whep/                      # WHEP WebRTC client
+├── playout/
+│   ├── packet-buffer.cpp/h        # Jitter buffer with keyframe lookup
+│   ├── playout-clock.h            # Shared media-to-OBS time mapping
+│   ├── recovery-policy.cpp/h      # Rate and cut decisions
+│   ├── sound-match.cpp/h          # Finds the offset between two sources by sound
+│   └── sync-registry.h            # Delay matching between sources
 ├── utils/
-│   ├── buffer-manager.cpp/h       # Buffer depth monitoring
-│   ├── tempo-ramper.cpp/h         # Smooth tempo transitions
 │   └── bitrate-monitor.cpp/h      # Bitrate tracking
 ├── network/
 │   ├── ws-stats-server.cpp/h      # WebSocket stats + binary preview server
+│   ├── ws-protocol.h              # Request parsing and access rules
+│   ├── program-preview.cpp/h      # OBS program preview
 │   └── preview-encoder.cpp/h      # JPEG/PCM preview encoder
 └── ui/
-    └── dashboard-dialog.cpp/h     # Stats dashboard (Qt)
+    ├── dashboard-dialog.cpp/h     # Stats dashboard (Qt)
+    ├── sync-panel.cpp/h           # Stream Sync dock
+    ├── fallback-dialog.cpp/h      # Fallback settings window
+    ├── context-buttons.cpp/h      # Buttons in the bar under the preview
+    ├── url-field-guard.cpp/h      # Hides a filled-in stream URL
+    ├── obs-remote.cpp/h           # Remote commands
+    ├── audio-meters.cpp/h         # Audio levels for the panel
+    └── sync-notice.cpp/h          # On-screen status notices
+tests/
+└── playout-logic-test.cpp         # Unit tests
+tools/
+└── stream-lab/                    # Two test streams with a panel to break them
 ```
+
+[Stream Lab](tools/stream-lab/README.md) sends two RTMP streams of one live event, with buttons for stalls, loss, disconnects, delay and claps, for testing sync and recovery in OBS.
 
 ## Disclaimer
 
@@ -252,7 +282,7 @@ The project is offered as-is. For issues, please [open a GitHub issue](https://g
 
 ### SoundTouch
 
-- **Purpose**: Audio time-stretching for catch-up playback
+- **Purpose**: Pitch-corrected audio while drifting back to the target latency
 - **Version**: 2.3.3 — [codeberg.org/soundtouch/soundtouch](https://codeberg.org/soundtouch/soundtouch)
 - **License**: LGPL 2.1 — statically linked; source available at the link above
 

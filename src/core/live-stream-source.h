@@ -2,21 +2,25 @@
 #pragma once
 
 #include "core/common.h"
-#include "core/catchup-orchestrator.h"
 #include "media/audio-decoder.h"
 #include "media/frame-queue.h"
+#include "playout/packet-buffer.h"
+#include "playout/playout-clock.h"
+#include "playout/recovery-policy.h"
+#include "playout/sync-registry.h"
 #include "utils/bitrate-monitor.h"
-#include "utils/buffer-manager.h"
-#include "utils/tempo-ramper.h"
 
 #include "media/stream-demuxer.h"
 #include "media/video-decoder.h"
+#include "core/fallback-layer.h"
+#include "media/privacy-blur.h"
 #include "network/preview-encoder.h"
 #include "network/ws-stats-server.h"
 #include "protocols/whep/whep-client.h"
 #include "utils/reconnect-manager.h"
 
 #include <atomic>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -66,6 +70,8 @@ struct OverlayDebouncer {
 
 class LiveStreamSource {
 public:
+  FallbackLayer &fallback_layer() { return fallback_layer_; }
+
   LiveStreamSource(obs_source_t *source, obs_data_t *settings);
   ~LiveStreamSource();
 
@@ -97,54 +103,96 @@ private:
   // Worker thread
   void worker_thread_func();
   void whep_worker();
-  void shimmer_thread_func();
+  void overlay_thread_func();
 
   // Frame output
   void video_tick(float seconds);
   void output_video_frame(AVFrame *frame);
   void output_audio_frame(DecodedAudioFrame &af);
-  void output_shimmer_frame();
-  void apply_transition_overlay(obs_source_frame2 &obs_frame,
-                                video_format obs_fmt, AVFrame *frame,
-                                double alpha);
 
-  // Soft-freeze recovery: skip-via-reanchor (legacy fallback for >4s gaps)
-  // gap_ms: source of trigger (0 = manual). set_cooldown: when true,
-  // sets the 15s cooldown that silently drops packets — wanted for
-  // automatic gap-detected skips (prevents teleport loops on a flaky
-  // network) but NOT for the manual "Skip to Live Edge" button (the
-  // user wants instant resume).
-  void handle_freeze_skip_recovery(int64_t gap_ms, bool set_cooldown = true);
+  void submit_video_frame(AVFrame *frame, uint64_t timestamp_ns);
+  void apply_cut_crossfade(obs_source_frame2 &obs_frame, video_format obs_fmt,
+                           AVFrame *frame, double alpha);
+
+  // Playout engine (Standard streams): the worker only reads the socket, the
+  // decode thread paces packets against playout_clock_, and the present thread
+  // hands frames to OBS on time. See live-stream-playout.cpp.
+  // Fixed for the life of a connection: stream_type_ changes as soon as the
+  // user edits it, while the decoders stay in use until the refresh happens.
+  bool uses_playout() const { return playout_enabled_.load(); }
+  void ingest_packet(AVPacket *pkt);
+  void playout_reset();
+  void playout_decode_thread_func();
+  void playout_present_thread_func();
+  void playout_restart_state();
+  void playout_update_metrics(int64_t now_us);
+  bool playout_step_buffering(int64_t now_us);
+  bool playout_step_playing(int64_t now_us);
+  void playout_run_policy(int64_t now_us);
+  void playout_update_sync(int64_t now_us, int64_t latency_us);
+  void playout_apply_shift(int64_t now_us, int64_t latency_us, int64_t min_target_us,
+                           const SyncConfig &config);
+  void playout_land(int64_t now_us, int64_t missing_us, int tolerance_ms);
+  void announce_move(int64_t now_us, int64_t by_us);
+  void playout_update_listen(int64_t now_us);
+  void apply_sync_offset(int64_t delta_us, const SyncConfig &config, int64_t now_us);
+  void apply_main_delay_request(int64_t now_us);
+  void publish_sync_progress();
+  void finish_sync_listen(SyncListenState result);
+  void request_sync_listen();
+  void apply_fallback_settings(obs_data_t *settings);
+  void playout_enter_buffering(int64_t now_us);
+  void playout_hold(int64_t now_us);
+  void playout_pause(int64_t now_us);
+  void playout_cut(int64_t now_us, const CutPoint *cut, int64_t target_us);
+  void playout_on_video_frame(AVFrame *frame);
+  void playout_feed_video(int64_t now_us);
+  void playout_feed_audio();
+  void playout_drain_audio();
+  void playout_emit_audio(DecodedAudioFrame &af);
+  void playout_start_audio_timeline(int64_t wall_us, int sample_rate);
+  void playout_write_audio(const float *left, const float *right, uint32_t frames);
+  void playout_pad_audio();
+  int64_t playout_decode_lead_us() const;
+  void open_decoders();
+  void request_skip_to_live();
+  void update_stream_delay(int64_t dts_ms);
+  void update_periodic_stats();
+
+  // Soft-freeze recovery: skip-via-reanchor (legacy fallback for >10s gaps)
+  // gap_ms: source of trigger. Sets a cooldown that prevents teleport loops
+  // on a flaky network.
+  void handle_freeze_skip_recovery(int64_t gap_ms);
 
   // Source visibility toggling
   void toggle_source_visibility(const std::string &name, bool visible);
   void update_source_toggles();
+  bool fallback_covers_picture() const;
+  void drop_picture();
 
   // Statistics
   void init_stats_dir();
   void write_stats_json();
-  void install_stats_html();
-  void install_overlay_html();
   static bool on_open_stats_clicked(obs_properties_t *props,
                                     obs_property_t *prop, void *data);
   static bool on_add_overlay_horz_clicked(obs_properties_t *props,
                                           obs_property_t *prop, void *data);
   static bool on_add_overlay_vert_clicked(obs_properties_t *props,
                                           obs_property_t *prop, void *data);
+  static bool on_fallback_settings_clicked(obs_properties_t *props, obs_property_t *property,
+                                           void *data);
   static bool on_show_window_stats_clicked(obs_properties_t *props,
                                            obs_property_t *prop, void *data);
   static bool on_refresh_clicked(obs_properties_t *props, obs_property_t *prop,
                                  void *data);
   static bool on_skip_to_live_clicked(obs_properties_t *props,
                                       obs_property_t *prop, void *data);
-
   void handle_remote_command(const std::string &cmd);
 
   static bool s_stream_type_modified(obs_properties_t *props,
                                      obs_property_t *prop,
                                      obs_data_t *settings);
-  static void populate_source_list(obs_property_t *list,
-                                   obs_source_t *self_source);
+  std::vector<std::string> scene_source_names() const;
 
   obs_source_t *obs_source_ = nullptr;
 
@@ -153,7 +201,6 @@ private:
   int low_bitrate_kbps_ = DEFAULT_LOW_BITRATE_KBPS;
   bool auto_catchup_ = true;
   bool hw_decode_ = false;
-  bool show_shimmer_ = true;
   StreamType stream_type_ = StreamType::Standard;
   std::string low_bitrate_src_name_;
   std::string disconnect_src_name_;
@@ -169,15 +216,111 @@ private:
   BitrateMonitor bitrate_mon_;
   ReconnectManager reconnect_mgr_;
 
-  // Professional catch-up system components
-  BufferManager buffer_manager_;
-  TempoRamper tempo_ramper_;
-  std::unique_ptr<CatchupOrchestrator> orchestrator_;
+  // Playout engine state. Everything in PlayoutRun belongs to the decode
+  // thread; the atomics below it are read by stats and the overlay logic.
+  enum class PlayoutPhase { Buffering, Playing };
+  struct PlayoutRun {
+    PlayoutPhase phase = PlayoutPhase::Buffering;
+    bool starting = true;
+    int64_t stall_start_us = 0;
+    int64_t data_since_us = 0;
+    bool reconnect_requested = false;
+    int64_t next_metrics_us = 0;
+    int64_t next_policy_us = 0;
+    int64_t metrics_newest_us = 0;
+    int64_t metrics_at_us = 0;
+    double ingest_rate = 1.0;
+
+    bool video_primed = true;
+    bool need_keyframe = false;
+    int64_t key_wait_start_us = 0;
+    int64_t preroll_us = INT64_MIN;
+    int64_t prime_start_us = 0;
+    int64_t last_fed_dts_us = 0;
+    int64_t last_frame_media_us = 0;
+    int64_t decoder_delay_us = 0;
+    int64_t frame_duration_us = 16667;
+    int64_t last_audio_wall_us = 0;
+
+    double rate = 1.0;
+    double main_delay_us = 0.0;
+    bool main_delay_valid = false;
+    bool sound_listening = false;
+    bool sync_hold = false; // paused on purpose to add delay
+    bool force_cut = false; // the next policy round cuts, whatever the backlog
+    bool jump_pending = false;
+    uint32_t main_move_id = 0;
+    bool shift_known = false;
+    int shift_applied_ms = 0;
+    int shift_seen_ms = 0;
+    int64_t shift_seen_us = 0;
+    int64_t shift_check_us = 0;
+
+    // Sample-counted audio timeline: rounding can't accumulate into drift.
+    uint64_t audio_base_ns = 0;
+    uint64_t audio_samples = 0;
+    int audio_rate = 0;
+    uint32_t audio_fade_left = 0;
+    uint32_t audio_fade_total = 0;
+  };
+
+  struct PresentFrame {
+    AVFrame *frame = nullptr;
+    int64_t media_us = 0;
+  };
+
+  PlayoutRun run_;
+  PacketBuffer packets_;
+  PlayoutClock playout_clock_;
+  RecoveryPolicy recovery_policy_;
+  MediaTimeline media_timeline_;
+  // Held around every decoder call. Reconnect paths take it to close or
+  // reopen the decoders while the decode thread is known to be idle.
+  std::mutex decoder_mutex_;
+  std::mutex present_queue_mutex_;
+  std::condition_variable present_cv_;
+  std::deque<PresentFrame> present_queue_;
+  // Held while a frame goes to OBS, so a reset can guarantee none lands after it.
+  std::mutex present_output_mutex_;
+  std::thread playout_decode_thread_;
+  std::thread playout_present_thread_;
+  std::atomic<bool> playout_enabled_{false};
+  std::atomic<uint64_t> playout_generation_{0};
+  std::atomic<bool> playout_stalled_{false};
+  std::atomic<bool> playout_has_video_{false};
+  std::atomic<bool> playout_has_audio_{false};
+  std::atomic<bool> playout_cut_fade_pending_{false};
+  std::atomic<int64_t> playout_latency_ms_{0};
+  std::atomic<int64_t> playout_target_ms_{0};
+  std::atomic<double> playout_rate_{1.0};
+  std::atomic<int> target_latency_ms_{DEFAULT_TARGET_LATENCY_MS};
+  std::atomic<int> recovery_mode_{static_cast<int>(RecoveryMode::CutToLive)};
+
+  // Delay matching against another source. ArrivalBaseline belongs to the
+  // worker; decode reads the published copy.
+  ArrivalBaseline arrival_baseline_;
+  std::atomic<int64_t> arrival_base_us_{INT64_MAX};
+  std::atomic<bool> sync_active_{false};
+  std::atomic<int64_t> sync_error_ms_{0};
+
+  // "Sync" button: listens to both sources until their sounds line up, then stops.
+  std::atomic<int> sync_listen_state_{static_cast<int>(SyncListenState::Idle)};
+  std::atomic<int64_t> sync_listen_until_us_{0};
+  std::atomic<int> sync_listen_base_delay_ms_{0}; // main delay when the sync began
+  std::atomic<int64_t> sync_listen_delta_ms_{0};
+  std::atomic<int> sync_heard_main_{0};
+  std::atomic<int> sync_heard_own_{0};
+  std::atomic<int> sync_listen_left_s_{0};
+  std::atomic<int> sync_listen_held_ms_{0};  // main source delayed by this for us
+  std::atomic<int> sync_listen_short_ms_{0}; // couldn't catch up by this much
+  std::atomic<int64_t> sync_result_until_us_{0};
+  SoundTracer sound_tracer_; // decode thread
+  int64_t cut_fade_start_ms_ = 0; // present thread: crossfade after a cut
 
   // Worker thread
   std::thread worker_thread_;
   std::thread connect_thread_;
-  std::thread shimmer_thread_;
+  std::thread overlay_thread_;
   std::atomic<bool> running_{false};
   std::atomic<bool> connection_in_progress_{false};
 
@@ -187,7 +330,7 @@ private:
   std::atomic<int64_t> last_connect_ms_{0};
 
   // Overlay visibility state. update_source_toggles() runs from both the
-  // worker and the shimmer thread, so the whole state machine is serialized.
+  // worker and the overlay thread, so the whole state machine is serialized.
   std::mutex toggle_mutex_;
   OverlayDebouncer disconnect_overlay_;
   OverlayDebouncer loading_overlay_;
@@ -227,11 +370,13 @@ private:
   std::atomic<bool> connected_{false};
   std::atomic<bool> first_frame_received_{false};
   std::atomic<bool> ever_received_frame_{false};
+  uint32_t sync_move_id_ = 0; // decode thread, outlives a reconnect
+  std::atomic<bool> disconnect_fallback_{false};
+  std::atomic<bool> loading_fallback_{false};
   std::atomic<int> whep_mode_{0}; // Stored as int, cast to WhepClient::WhepMode
   std::atomic<int> reconnect_count_{0};
   std::atomic<double> current_fps_{0.0};
   int64_t last_fps_calc_ms_ = 0;
-  int64_t last_shimmer_ms_ = 0;
   int64_t last_frames_count_ = 0;
   int64_t last_pkt_recv_ms_ = 0;
 
@@ -239,13 +384,6 @@ private:
   // Used to accurately measure genuine network freezes without including
   // processing or pacing sleep time.
   int64_t empty_buffer_start_ms_ = 0;
-
-  // RTMP extreme skip: used ONLY for gaps > 30 seconds to drop the burst
-  bool rtmp_skip_to_live_ = false;
-  int64_t skip_start_ms_ = 0;
-  double skip_rate_ema_ = 5.0;
-  int64_t skip_prev_pts_ms_ = 0;
-  int64_t skip_prev_wall_ms_ = 0;
 
   int64_t pts_to_obs_offset_ns_ = 0;
   bool has_pts_offset_ = false;
@@ -256,11 +394,7 @@ private:
   int64_t catchup_first_wall_ms_ = 0;
   int64_t catchup_first_pts_ms_ = 0;
 
-  // State used by the tempo-compression path in output_video_frame and the
-  // freeze-recovery cooldown that suppresses catchup re-entry briefly after
-  // a skip-resync. Other catchup tracking lives in CatchupOrchestrator.
-  int64_t catchup_prev_video_pts_ns_ = 0;
-  int64_t catchup_video_output_clock_ns_ = 0;
+  // Suppresses another freeze recovery briefly after a skip-resync.
   int64_t catchup_cooldown_until_ms_ = 0;
 
   std::atomic<int64_t> total_frames_dropped_decode_{0};
@@ -277,7 +411,6 @@ private:
   bool has_delay_ref_ = false;
   std::atomic<int64_t> stream_delay_ms_{0};
 
-  std::vector<uint8_t> shimmer_buffer_; // Reusable buffer for animation
 
   // Dashboard live preview & remote controls. The encoder is idle whenever
   // no websocket client is connected; the mute/blur flags are flipped by
@@ -293,32 +426,21 @@ private:
   std::atomic<bool> preview_video_enabled_{false};
   std::atomic<bool> preview_audio_enabled_{false};
   // Blur via 1/8 scale-down + scale-up (cheap swscale, no custom kernel).
-  struct SwsContext *blur_sws_down_ = nullptr;
-  struct SwsContext *blur_sws_up_   = nullptr;
-  int blur_cached_w_   = 0;
-  int blur_cached_h_   = 0;
-  int blur_cached_fmt_ = -1; // AVPixelFormat
-  std::vector<uint8_t> blur_small_buf_; // tiny intermediate I420 frame
+  PrivacyBlur privacy_blur_;
+  FallbackLayer fallback_layer_;
   void handle_dashboard_command(const std::string &json_cmd);
   void send_preview_video(const AVFrame *frame);
   void send_preview_audio(const DecodedAudioFrame &af);
-  void apply_blur_inplace(obs_source_frame2 &obs_frame, video_format fmt,
-                          AVFrame *frame);
+  void apply_blur_inplace(obs_source_frame2 &obs_frame, AVFrame *frame);
   void draw_mute_icon(obs_source_frame2 &obs_frame, video_format fmt,
                       AVFrame *frame);
 
-  // Shimmer → live transition: when the first frame of a stream cycle
-  // arrives, overlay decaying TV-static noise on the video for ~700ms so
-  // the shimmer dissolves into the picture instead of cutting hard.
-  int64_t first_frame_wall_ms_ = 0;            // 0 = not in transition
   std::vector<uint8_t> trans_y_buf_;
   std::vector<uint8_t> trans_u_buf_;
   std::vector<uint8_t> trans_v_buf_;
-  static constexpr int64_t TRANSITION_FADE_MS = 700;
+  static constexpr int64_t CUT_FADE_MS = 200;
 
-  // Live → shimmer fade-out: cache of the most recent live frame so that
-  // when the stream drops, the shimmer thread can overlay rising noise on
-  // top of it (mirror of the fade-in) instead of hard-cutting to shimmer.
+  // The most recent live frame, for the cut crossfade.
   std::mutex last_frame_mutex_;
   std::vector<uint8_t> last_y_buf_, last_u_buf_, last_v_buf_;
   video_format last_frame_fmt_ = VIDEO_FORMAT_NONE;
@@ -326,24 +448,16 @@ private:
   int  last_frame_ly_ = 0, last_frame_lu_ = 0, last_frame_lv_ = 0;
   bool last_frame_full_range_ = false;
   bool has_last_frame_ = false;
-  std::atomic<int64_t> fade_out_start_ms_{0};        // 0 = not active
-  static constexpr int64_t FADEOUT_DURATION_MS = 700;
 
   void cache_last_frame(AVFrame *frame, video_format fmt, bool full_range);
-  void apply_noise_overlay_raw(obs_source_frame2 &obs_frame, video_format fmt,
-                               int w, int h,
-                               const uint8_t *src_y, int ly,
-                               const uint8_t *src_u, int lu,
-                               const uint8_t *src_v, int lv,
-                               double alpha);
-  void output_fadeout_frame(double alpha);
 
-  // Burst-skip: packet-level discard for large drops (>2s).
-  // Worker reads and discards packets until burst_skip_target_pts_ms_ is reached,
-  // then reanchors at the live edge. Gives <1s recovery for 2-12s drops.
+  // Burst-skip (HLS/IVS): packet-level discard for large drops (>2s).
+  // Worker reads and discards packets until burst_skip_target_pts_ms_ is
+  // reached, then resumes on a keyframe at the live edge.
   bool burst_skip_active_ = false;
   int64_t burst_skip_target_pts_ms_ = 0; // Target PTS (live edge estimate)
   int64_t burst_skip_start_ms_ = 0;      // Wall time when burst_skip started (timeout guard)
+  bool burst_skip_wait_key_ = false;     // Target reached, holding for a keyframe
 
   uint32_t last_video_ts_ = 0;
   uint64_t video_pts_ns_ = 0;

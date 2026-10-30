@@ -54,11 +54,11 @@ bool PreviewEncoder::ensure_video_ctx(int src_w, int src_h,
 
   // MJPEG encoder expects YUVJ420P (full-range) input.
   sws_ctx_ = sws_getContext(src_w, src_h, src_fmt,
-                            PREVIEW_WIDTH, PREVIEW_HEIGHT, AV_PIX_FMT_YUVJ420P,
+                            width_, height_, AV_PIX_FMT_YUVJ420P,
                             SWS_BILINEAR, nullptr, nullptr, nullptr);
   if (!sws_ctx_) {
     lss_log_warn("preview: sws_getContext failed (%dx%d %d → %dx%d)",
-                 src_w, src_h, (int)src_fmt, PREVIEW_WIDTH, PREVIEW_HEIGHT);
+                 src_w, src_h, (int)src_fmt, width_, height_);
     return false;
   }
   sws_in_w_   = src_w;
@@ -69,8 +69,8 @@ bool PreviewEncoder::ensure_video_ctx(int src_w, int src_h,
     scaled_frame_ = av_frame_alloc();
     if (!scaled_frame_) return false;
     scaled_frame_->format = AV_PIX_FMT_YUVJ420P;
-    scaled_frame_->width  = PREVIEW_WIDTH;
-    scaled_frame_->height = PREVIEW_HEIGHT;
+    scaled_frame_->width  = width_;
+    scaled_frame_->height = height_;
     if (av_frame_get_buffer(scaled_frame_, 32) < 0) {
       av_frame_free(&scaled_frame_);
       return false;
@@ -86,13 +86,13 @@ bool PreviewEncoder::ensure_video_ctx(int src_w, int src_h,
     jpeg_ctx_ = avcodec_alloc_context3(codec);
     if (!jpeg_ctx_) return false;
     jpeg_ctx_->pix_fmt   = AV_PIX_FMT_YUVJ420P;
-    jpeg_ctx_->width     = PREVIEW_WIDTH;
-    jpeg_ctx_->height    = PREVIEW_HEIGHT;
+    jpeg_ctx_->width     = width_;
+    jpeg_ctx_->height    = height_;
     jpeg_ctx_->time_base = {1, PREVIEW_FPS};
     jpeg_ctx_->framerate = {PREVIEW_FPS, 1};
     // qscale → quality. Lower = better quality, bigger file.
     jpeg_ctx_->flags        |= AV_CODEC_FLAG_QSCALE;
-    jpeg_ctx_->global_quality = FF_QP2LAMBDA * PREVIEW_JPEG_QUALITY;
+    jpeg_ctx_->global_quality = FF_QP2LAMBDA * jpeg_quality_;
     if (avcodec_open2(jpeg_ctx_, codec, nullptr) < 0) {
       lss_log_warn("preview: MJPEG avcodec_open2 failed");
       avcodec_free_context(&jpeg_ctx_);
@@ -117,7 +117,7 @@ bool PreviewEncoder::encode_video_jpeg(const AVFrame *frame,
                         (AVPixelFormat)frame->format))
     return false;
 
-  // Scale source → 480p YUVJ420P
+  // Scale source → preview size YUVJ420P
   uint8_t *dst[4] = {scaled_frame_->data[0], scaled_frame_->data[1],
                       scaled_frame_->data[2], nullptr};
   int dst_ls[4] = {scaled_frame_->linesize[0], scaled_frame_->linesize[1],

@@ -107,7 +107,7 @@ bool LLHlsFetcher::fetch_playlist(const std::string &url, std::string &out_text,
     char errbuf[AV_ERROR_MAX_STRING_SIZE];
     av_strerror(ret, errbuf, sizeof(errbuf));
     lss_log_error("[LL-HLS Fetcher] Failed to open playlist URL: %s (err=%s)",
-                  fetch_url.c_str(), errbuf);
+                  url_for_log(fetch_url).c_str(), errbuf);
     return false;
   }
 
@@ -155,7 +155,7 @@ bool LLHlsFetcher::fetch_data(const std::string &url,
     char errbuf[AV_ERROR_MAX_STRING_SIZE];
     av_strerror(ret, errbuf, sizeof(errbuf));
     lss_log_error("[LL-HLS Fetcher] Failed to open data URL: %s (err=%s)",
-                  url.c_str(), errbuf);
+                  url_for_log(url).c_str(), errbuf);
     return false;
   }
 

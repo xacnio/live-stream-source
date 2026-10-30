@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!-- Live Stream Source fills in the text, colour and size. Everything in rem follows the size setting. -->
+<style>
+* { box-sizing: border-box; margin: 0; }
+html, body { width: 100vw; height: 100vh; overflow: hidden; background: transparent; }
+html { font-size: calc(1vh * {{scale}} / 100); }
+body { display: grid; place-items: center; color: {{color}}; font-family: "Segoe UI", Roboto, Arial, sans-serif; }
+body { background: radial-gradient(circle at 50% 42%, #1a1f2b 0%, #090b10 70%); }
+.wrap { display: grid; justify-items: center; gap: 5rem; }
+.waves { position: relative; width: 26rem; height: 26rem; }
+.waves i { position: absolute; inset: 0; border-radius: 50%; border: .7rem solid {{color}}; opacity: 0; animation: wave 2.4s ease-out infinite; }
+.waves i:nth-child(2) { animation-delay: .8s; }
+.waves i:nth-child(3) { animation-delay: 1.6s; }
+.waves b { position: absolute; inset: 42%; border-radius: 50%; background: #ff5a5f; box-shadow: 0 0 4rem #ff5a5f; animation: beat 1.2s ease-in-out infinite; }
+h1 { font-size: 6rem; font-weight: 700; letter-spacing: .02em; }
+@keyframes wave { from { transform: scale(.25); opacity: .9; } to { transform: scale(1.25); opacity: 0; } }
+@keyframes beat { 50% { transform: scale(.72); opacity: .6; } }
+</style>
+</head>
+<body>
+<div class="wrap"><div class="waves"><i></i><i></i><i></i><b></b></div><h1>{{text}}</h1></div>
+</body>
+</html>

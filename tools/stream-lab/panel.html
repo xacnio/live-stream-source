@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stream Lab</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 20px; background: #15171c; color: #e8e9ec; font: 14px "Segoe UI", system-ui, sans-serif; }
+  h1 { margin: 0; font-size: 18px; }
+  header { display: flex; align-items: baseline; gap: 16px; margin-bottom: 16px; }
+  #now { font: 700 22px Consolas, monospace; color: #f5d547; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .card { background: #1f2229; border: 1px solid #2e323c; border-radius: 10px; padding: 14px; }
+  .card h2 { margin: 0 0 10px; font-size: 15px; display: flex; justify-content: space-between; }
+  .state { font-weight: 600; color: #9aa0ac; }
+  .state.live { color: #4ade80; }
+  .state.offline, .state.retrying { color: #f87171; }
+  .numbers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
+  .numbers div { background: #15171c; border-radius: 6px; padding: 6px 8px; }
+  .numbers b { display: block; font: 600 15px Consolas, monospace; }
+  .numbers span { color: #9aa0ac; font-size: 12px; }
+  .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 8px; }
+  button { background: #2e323c; color: inherit; border: 1px solid #3c414d; border-radius: 6px; padding: 7px 11px; font: inherit; cursor: pointer; }
+  button:hover { background: #3a3f4b; }
+  button.go { background: #166534; border-color: #15803d; }
+  button.bad { background: #7f1d1d; border-color: #991b1b; }
+  input { background: #15171c; color: inherit; border: 1px solid #3c414d; border-radius: 6px; padding: 7px 8px; font: inherit; }
+  input[type=number] { width: 84px; }
+  input[type=text] { flex: 1; min-width: 0; }
+  label { color: #9aa0ac; }
+  #events { margin: 0; max-height: 240px; overflow: auto; font: 13px Consolas, monospace; white-space: pre-wrap; color: #c6c9d0; }
+  .full { grid-column: 1 / -1; }
+</style>
+</head>
+<body>
+<header><h1>Stream Lab</h1><span id="now">00:00.000</span><label>timeline, the same counter that's burned into the picture</label></header>
+<div class="grid">
+  <section class="card" data-stream="a"></section>
+  <section class="card" data-stream="b"></section>
+  <section class="card full">
+    <div class="row">
+      <label>Both streams</label>
+      <input type="number" id="both-seconds" value="3" min="0.1" step="0.5"> s
+      <button data-both="stall">Stall</button>
+      <button data-both="loss">Loss</button>
+      <button data-both="disconnect">Disconnect</button>
+      <button class="go" data-both="clap" title="Three claps at the next moment on the timeline, heard by both cameras">Clap</button>
+    </div>
+  </section>
+  <section class="card full"><pre id="events"></pre></section>
+</div>
+<template id="card">
+  <h2><span class="name"></span><span class="state">stopped</span></h2>
+  <div class="numbers">
+    <div><b class="kbps">0</b><span>kbps sent</span></div>
+    <div><b class="sent">-</b><span>last sent</span></div>
+    <div><b class="behind">0</b><span>ms behind live</span></div>
+  </div>
+  <div class="row">
+    <input type="text" class="url" spellcheck="false" placeholder="rtmp://server/live/key">
+    <button class="go" data-do="start">Start</button>
+    <button data-do="stop">Stop</button>
+  </div>
+  <div class="row">
+    <label>For</label><input type="number" class="seconds" value="3" min="0.1" step="0.5"> s
+    <button class="bad" data-do="stall" title="Nothing arrives, then the backlog comes in a burst">Stall</button>
+    <button class="bad" data-do="loss" title="That part of the stream is gone for good">Loss</button>
+    <button class="bad" data-do="disconnect" title="The connection drops, then a fresh publish at the live point">Disconnect</button>
+    <button class="bad" data-do="thin" title="About 950 kbps: the picture moves for a moment each second, sound carries on">Low bitrate</button>
+    <button class="bad" data-do="jitter" title="Data arrives in uneven clumps">Jitter</button>
+  </div>
+  <div class="row">
+    <label>Delay</label><input type="number" class="delay" value="0" step="100"> ms
+    <button data-do="delay" title="Holds this stream back from the live point, like a slower path">Set</button>
+  </div>
+</template>
+<script>
+  const act = order => fetch('/api/act', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(order),
+  });
+  const cards = {};
+
+  for (const card of document.querySelectorAll('.card[data-stream]')) {
+    const stream = card.dataset.stream;
+    card.append(document.getElementById('card').content.cloneNode(true));
+    card.querySelector('.name').textContent = 'Camera ' + stream.toUpperCase();
+    cards[stream] = card;
+
+    card.addEventListener('click', async event => {
+      const action = event.target.dataset.do;
+      if (!action) return;
+      if (action === 'start') {
+        await act({
+          action: 'urls',
+          a: cards.a.querySelector('.url').value,
+          b: cards.b.querySelector('.url').value,
+        });
+      }
+      const value = action === 'delay'
+        ? card.querySelector('.delay').value
+        : card.querySelector('.seconds').value;
+      act({ action, stream, value });
+    });
+  }
+
+  document.querySelectorAll('[data-both]').forEach(button => {
+    button.addEventListener('click', () => act({
+      action: button.dataset.both, stream: 'both',
+      value: document.getElementById('both-seconds').value,
+    }));
+  });
+
+  let filled = false;
+  async function refresh() {
+    const state = await (await fetch('/api/state')).json();
+    document.getElementById('now').textContent = state.now;
+    document.getElementById('events').textContent = state.events.join('\n');
+    for (const [key, info] of Object.entries(state.streams)) {
+      const card = cards[key];
+      const label = card.querySelector('.state');
+      label.textContent = info.state;
+      label.className = 'state ' + info.state;
+      card.querySelector('.kbps').textContent = info.kbps;
+      card.querySelector('.sent').textContent = info.sent;
+      card.querySelector('.behind').textContent = info.behind_ms;
+      if (!filled) card.querySelector('.url').value = state.config[key];
+    }
+    filled = true;
+  }
+  setInterval(refresh, 300);
+  refresh();
+</script>
+</body>
+</html>

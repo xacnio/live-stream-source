@@ -93,7 +93,8 @@
             position: relative;
         }
 
-        input[type="text"] {
+        input[type="text"],
+        input[type="password"] {
             width: 100%;
             background: rgba(12, 12, 20, 0.5);
             border: 1px solid var(--border);
@@ -106,7 +107,8 @@
             outline: none;
         }
 
-        input[type="text"]:focus {
+        input[type="text"]:focus,
+        input[type="password"]:focus {
             border-color: var(--accent);
             box-shadow: 0 0 0 3px rgba(108, 92, 231, 0.15);
         }
@@ -338,6 +340,83 @@
             gap: 8px;
         }
 
+        .scene-panel {
+            margin-bottom: 16px;
+        }
+
+        .scene-panel[hidden] {
+            display: none;
+        }
+
+        .scene-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .scene-status {
+            color: var(--danger);
+            font-weight: 600;
+            font-size: 13px;
+        }
+
+        .scene-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 8px;
+        }
+
+        .scene-btn {
+            min-height: 56px;
+            padding: 10px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: transparent;
+            color: var(--text-primary);
+            font: inherit;
+            font-weight: 600;
+            cursor: pointer;
+            overflow-wrap: anywhere;
+        }
+
+        .scene-btn.active {
+            border-color: var(--success);
+            background: rgba(46, 160, 67, 0.18);
+        }
+
+        @media (max-width: 640px) {
+            .connection-panel {
+                flex-direction: column;
+                align-items: stretch;
+            }
+
+            .header h1 {
+                font-size: 20px;
+            }
+
+            .scene-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            .scene-btn {
+                min-height: 72px;
+            }
+
+            .action-buttons,
+            .preview-controls {
+                flex-wrap: wrap;
+            }
+
+            .preview-divider {
+                display: none;
+            }
+
+            .btn-action {
+                min-height: 44px;
+            }
+        }
+
         .btn-action {
             background: rgba(255, 255, 255, 0.06);
             border: 1px solid rgba(255, 255, 255, 0.10);
@@ -500,7 +579,18 @@
             <div class="input-group">
                 <input type="text" id="wsInput" placeholder="ws://localhost:4477/" value="ws://localhost:4477/">
             </div>
+            <div class="input-group">
+                <input type="password" id="wsKey" placeholder="Access key" autocomplete="current-password">
+            </div>
             <button class="btn-connect" id="connectBtn">Connect to Server</button>
+        </div>
+
+        <div class="scene-panel" id="scenePanel" hidden>
+            <div class="scene-header">
+                <span class="section-title">Scenes</span>
+                <span class="scene-status" id="sceneStatus"></span>
+            </div>
+            <div class="scene-grid" id="sceneGrid"></div>
         </div>
 
         <div class="source-tabs" id="sourceTabs">
@@ -561,6 +651,10 @@
 
                 this.elements = {
                     input: document.getElementById('wsInput'),
+                    key: document.getElementById('wsKey'),
+                    scenePanel: document.getElementById('scenePanel'),
+                    sceneGrid: document.getElementById('sceneGrid'),
+                    sceneStatus: document.getElementById('sceneStatus'),
                     btnConnect: document.getElementById('connectBtn'),
                     tabsContainer: document.getElementById('sourceTabs'),
                     contentContainer: document.getElementById('dashboardContent'),
@@ -576,8 +670,21 @@
                     btnBlur: document.getElementById('btnBlur')
                 };
 
+                // Served over HTTPS the panel sits behind the proxy, so the
+                // server address follows from the page's own.
+                if (location.protocol === 'https:')
+                    this.elements.input.value = `wss://${location.host}/ws`;
+                this.elements.key.value = localStorage.getItem('lssAccessKey') || '';
+
                 this.bindEvents();
                 this.initConnection();
+
+                // Phones suspend the page in the background: reconnect on return.
+                document.addEventListener('visibilitychange', () => {
+                    if (!document.hidden && !this.authFailed &&
+                        (!this.socket || this.socket.readyState > WebSocket.OPEN))
+                        this.initConnection();
+                });
             }
 
             bindEvents() {
@@ -585,8 +692,10 @@
                     this.initConnection(this.elements.input.value);
                 });
 
-                this.elements.input.addEventListener('keypress', (e) => {
-                    if (e.key === 'Enter') this.initConnection(this.elements.input.value);
+                [this.elements.input, this.elements.key].forEach(field => {
+                    field.addEventListener('keypress', (e) => {
+                        if (e.key === 'Enter') this.initConnection(this.elements.input.value);
+                    });
                 });
 
                 this.setupPreviewControls();
@@ -594,6 +703,12 @@
 
             initConnection(url = null) {
                 const targetUrl = url || this.elements.input.value;
+                const accessKey = this.elements.key.value;
+
+                this.authFailed = false;
+                clearTimeout(this.reconnectTimer);
+                if (accessKey)
+                    localStorage.setItem('lssAccessKey', accessKey);
 
                 if (this.socket) {
                     this.socket.close();
@@ -610,8 +725,15 @@
                     return;
                 }
 
+                const socket = this.socket;
+
                 this.socket.onopen = () => {
-                    this.elements.globalStatus.textContent = `Connected securely to ${targetUrl}`;
+                    // The plugin fills in its token when it writes this page to disk.
+                    const pageToken = '__LSS_PAGE_TOKEN__';
+                    const proof = accessKey || (pageToken.startsWith('__') ? '' : pageToken);
+                    if (proof)
+                        socket.send(JSON.stringify({ auth: proof }));
+                    this.elements.globalStatus.textContent = `Connected to ${targetUrl}`;
                     this.elements.globalStatus.style.color = 'var(--success)';
                     // Lazily start AudioContext on first connect — browsers
                     // require a user gesture, but pressing Connect counts.
@@ -626,6 +748,12 @@
                     }
                     try {
                         const payload = JSON.parse(event.data);
+                        if (payload && payload.auth_error) {
+                            this.authFailed = true;
+                            return;
+                        }
+                        if (payload && payload.obs)
+                            this.renderScenes(payload.obs);
                         if (payload && payload.sources) {
                             this.handleIncomingData(payload.sources);
                         }
@@ -635,14 +763,66 @@
                 };
 
                 this.socket.onclose = () => {
-                    this.elements.globalStatus.textContent = 'Disconnected from server.';
+                    if (socket !== this.socket)
+                        return;
+                    this.elements.scenePanel.hidden = true;
                     this.elements.globalStatus.style.color = 'var(--danger)';
+                    if (this.authFailed) {
+                        this.elements.globalStatus.textContent = 'Wrong access key.';
+                        return;
+                    }
+                    this.elements.globalStatus.textContent = 'Disconnected, retrying...';
+                    this.reconnectTimer = setTimeout(() => this.initConnection(), 3000);
                 };
 
                 this.socket.onerror = (err) => {
                     console.error("WebSocket encountered an error:", err);
                     this.socket.close();
                 };
+            }
+
+            renderScenes(state) {
+                const scenes = state.scenes || [];
+                this.elements.scenePanel.hidden = scenes.length === 0;
+                this.elements.sceneStatus.textContent =
+                    [state.streaming ? 'LIVE' : '', state.recording ? 'REC' : ''].filter(Boolean).join(' · ');
+
+                const signature = JSON.stringify([scenes, state.current_scene]);
+                if (signature === this.sceneSignature)
+                    return;
+                this.sceneSignature = signature;
+
+                this.elements.sceneGrid.innerHTML = '';
+                scenes.forEach(scene => {
+                    const btn = document.createElement('button');
+                    btn.classList.add('scene-btn');
+                    btn.classList.toggle('active', scene.name === state.current_scene);
+                    btn.textContent = scene.name;
+                    btn.addEventListener('click', () => {
+                        if (this.socket && this.socket.readyState === WebSocket.OPEN)
+                            this.socket.send(JSON.stringify({ command: 'set_scene', scene: scene.name }));
+                    });
+                    this.elements.sceneGrid.appendChild(btn);
+                });
+            }
+
+            // Two taps for anything that interrupts the stream.
+            bindConfirm(id, command, label) {
+                const btn = document.getElementById(id);
+                if (!btn)
+                    return;
+                if (this.armedCommand === command && Date.now() < this.armedUntil)
+                    btn.textContent = label;
+                btn.addEventListener('click', () => {
+                    if (this.armedCommand === command && Date.now() < this.armedUntil) {
+                        this.armedCommand = null;
+                        this.sendCommand(command, btn);
+                    } else {
+                        this.armedCommand = command;
+                        this.armedUntil = Date.now() + 3000;
+                        btn.textContent = label;
+                    }
+                });
             }
 
             handleIncomingData(sources) {
@@ -694,12 +874,11 @@
                 const htmlTemplate = this.generateDashboardHTML(data);
                 this.elements.contentContainer.innerHTML = htmlTemplate;
 
-                const btnRefresh = document.getElementById('btnRefresh');
-                const btnLiveEdge = document.getElementById('btnLiveEdge');
-                if (btnRefresh)
-                    btnRefresh.addEventListener('click', () => this.sendCommand('refresh', btnRefresh));
-                if (btnLiveEdge)
-                    btnLiveEdge.addEventListener('click', () => this.sendCommand('live_to_edge', btnLiveEdge));
+                this.bindConfirm('btnRefresh', 'refresh', 'Tap again to refresh');
+                this.bindConfirm('btnLiveEdge', 'live_to_edge', 'Tap again to skip');
+                const btnSync = document.getElementById('btnSync');
+                if (btnSync)
+                    btnSync.addEventListener('click', () => this.sendCommand('sync_listen', btnSync));
             }
 
             sendCommand(command, btn) {
@@ -870,6 +1049,7 @@
                             <div class="action-buttons">
                                 <button class="btn-action" id="btnRefresh">&#x21BB; Refresh</button>
                                 <button class="btn-action btn-live-edge" id="btnLiveEdge">&#x26A1; Live Edge</button>
+                                <button class="btn-action" id="btnSync">&#x1F44F; Sync</button>
                             </div>
                             <div class="uptime-display">
                                 Session Uptime: <span>${this.formatUptime(data.uptime_s || 0)}</span>
@@ -934,6 +1114,22 @@
                         : data.catchup_state && data.catchup_state !== 'Normal'
                             ? `<span class="badge badge-neutral">${data.catchup_state}</span>`
                             : '<span class="badge badge-neutral">Idle</span>'}
+                                </span>
+                            </div>
+                            <div class="stat-card">
+                                <span class="stat-label">Source Sync</span>
+                                <span class="stat-value">
+                                    ${data.sync_listen_state === 'Listening'
+                        ? '<span class="badge badge-warning">Listening: clap three times</span>'
+                        : data.sync_listen_state === 'Found'
+                            ? `<span class="badge badge-neutral">Matched · ${data.sync_listen_delta_ms} ms</span>`
+                            : data.sync_listen_state === 'NotFound'
+                                ? '<span class="badge badge-warning">No claps found</span>'
+                                : data.sync_listen_state === 'NoSource'
+                                    ? '<span class="badge badge-warning">No source chosen</span>'
+                                    : data.sync_active
+                                        ? `<span class="badge badge-neutral">Following · ${data.sync_error_ms} ms</span>`
+                                        : '<span class="badge badge-neutral">Off</span>'}
                                 </span>
                             </div>
                             <div class="stat-card">
