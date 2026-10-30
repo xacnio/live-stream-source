@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!-- Live Stream Source fills in the text, colour and size. Everything in rem follows the size setting. -->
+<style>
+* { box-sizing: border-box; margin: 0; }
+html, body { width: 100vw; height: 100vh; overflow: hidden; background: transparent; }
+html { font-size: calc(1vh * {{scale}} / 100); }
+body { display: grid; place-items: center; color: {{color}}; font-family: "Segoe UI", Roboto, Arial, sans-serif; }
+body { background: #0b0d12; }
+.wrap { display: grid; justify-items: center; gap: 4rem; }
+.ring { width: 14rem; height: 14rem; border-radius: 50%; border: 1.1rem solid rgba(255,255,255,.12); border-top-color: {{color}}; animation: spin .9s linear infinite; }
+h1 { font-size: 4.6rem; font-weight: 600; opacity: .9; }
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="wrap"><div class="ring"></div><h1>{{text}}</h1></div>
+</body>
+</html>
