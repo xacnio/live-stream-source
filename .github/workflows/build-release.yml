@@ -131,13 +131,14 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          mkdir -p package/obs-plugins/live-stream-source/bin/64bit
+          mkdir -p package/obs-plugins/64bit
           mkdir -p package/data/obs-plugins/live-stream-source/locale
           cp build/Release/live-stream-source.dll \
-             package/obs-plugins/live-stream-source/bin/64bit/live-stream-source.dll
+             package/obs-plugins/64bit/live-stream-source.dll
           cp build/Release/live-stream-source.pdb \
-             package/obs-plugins/live-stream-source/bin/64bit/live-stream-source.pdb 2>/dev/null || true
+             package/obs-plugins/64bit/live-stream-source.pdb 2>/dev/null || true
           cp -r data/locale/* package/data/obs-plugins/live-stream-source/locale/
+          cp -r data/fallback-templates package/data/obs-plugins/live-stream-source/
 
       - name: Archive Artifacts (Windows)
         if: runner.os == 'Windows'
@@ -156,6 +157,7 @@ jobs:
           cp build/live-stream-source.so \
              package/live-stream-source/bin/64bit/live-stream-source.so
           cp -r data/locale/* package/live-stream-source/data/locale/
+          cp -r data/fallback-templates package/live-stream-source/data/
 
       - name: Archive Artifacts (Linux)
         if: runner.os == 'Linux'
@@ -174,6 +176,7 @@ jobs:
           mkdir -p "$PLUGIN/Resources/locale"
           cp build/live-stream-source.so "$PLUGIN/MacOS/live-stream-source.so"
           cp -r data/locale/* "$PLUGIN/Resources/locale/"
+          cp -r data/fallback-templates "$PLUGIN/Resources/"
 
       - name: Archive Artifacts (macOS)
         if: startsWith(runner.os, 'macOS')
@@ -213,6 +216,7 @@ jobs:
                artifacts/macos-intel/live-stream-source.plugin/Contents/MacOS/live-stream-source.so
 
           cp -r data/locale/* "$PLUGIN/Resources/locale/"
+          cp -r data/fallback-templates "$PLUGIN/Resources/"
 
           # Installer
           PKG_ROOT="pkg_root/live-stream-source.plugin"

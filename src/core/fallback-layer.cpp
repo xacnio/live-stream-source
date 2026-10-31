@@ -92,6 +92,7 @@ static obs_source_t *create_background(const FallbackSpec &spec) {
     return nullptr;
   obs_data_t *settings = obs_data_create();
   obs_data_set_string(settings, "file", spec.background_file.c_str());
+  obs_data_set_bool(settings, "unload", true);
   obs_source_t *child = obs_source_create_private("image_source", "lss-fallback-background", settings);
   obs_data_release(settings);
   return child;
@@ -124,6 +125,7 @@ static obs_source_t *create_child(const FallbackSpec &spec, const char *owner_uu
   }
   case FallbackKind::Image:
     obs_data_set_string(settings, "file", spec.file.c_str());
+    obs_data_set_bool(settings, "unload", true);
     child = obs_source_create_private("image_source", "lss-fallback-image", settings);
     break;
   case FallbackKind::Video:
@@ -131,6 +133,7 @@ static obs_source_t *create_child(const FallbackSpec &spec, const char *owner_uu
     obs_data_set_string(settings, "local_file", spec.file.c_str());
     obs_data_set_bool(settings, "looping", true);
     obs_data_set_bool(settings, "restart_on_activate", true);
+    obs_data_set_bool(settings, "close_when_inactive", true);
     child = obs_source_create_private("ffmpeg_source", "lss-fallback-video", settings);
     break;
   case FallbackKind::Browser: {
@@ -140,9 +143,9 @@ static obs_source_t *create_child(const FallbackSpec &spec, const char *owner_uu
     obs_data_set_string(settings, "url", spec.url.c_str());
     obs_data_set_int(settings, "width", BROWSER_WIDTH);
     obs_data_set_int(settings, "height", BROWSER_HEIGHT);
-    // A page of your own gets its intro back every time. A reload blanks the page
-    // for a moment though, which a template doesn't need: it's kept ready to show.
-    obs_data_set_bool(settings, "restart_when_active", !spec.uses_template());
+    // A page only exists while it's needed. Its sound goes straight to the speakers,
+    // past OBS, so one left running in the background would stay audible everywhere.
+    obs_data_set_bool(settings, "shutdown", true);
     // OBS's default stylesheet wipes a page's background colour.
     if (spec.uses_template())
       obs_data_set_string(settings, "css", "");
@@ -176,14 +179,14 @@ static void ensure_filter(obs_source_t *owner) {
   }
 }
 
-static void release_layer(obs_source_t *child, obs_source_t *background, bool active) {
-  if (active) {
-    for (obs_source_t *source : {child, background}) {
-      if (source) {
-        obs_source_dec_showing(source);
-        obs_source_dec_active(source);
-      }
-    }
+static void release_layer(obs_source_t *child, obs_source_t *background, bool ready, bool active) {
+  for (obs_source_t *source : {child, background}) {
+    if (!source)
+      continue;
+    if (ready)
+      obs_source_dec_showing(source);
+    if (active)
+      obs_source_dec_active(source);
   }
   obs_source_release(child);
   obs_source_release(background);
@@ -191,7 +194,7 @@ static void release_layer(obs_source_t *child, obs_source_t *background, bool ac
 
 FallbackLayer::~FallbackLayer() {
   for (Layer &layer : layers_)
-    release_layer(layer.child, layer.background, layer.active);
+    release_layer(layer.child, layer.background, layer.ready, layer.active);
   if (texrender_ || fade_effect_) {
     obs_enter_graphics();
     gs_texrender_destroy(texrender_);
@@ -207,6 +210,7 @@ void FallbackLayer::configure(obs_source_t *owner, FallbackState state, const Fa
   const int index = static_cast<int>(state) - 1;
   obs_source_t *old_child = nullptr;
   obs_source_t *old_background = nullptr;
+  bool was_ready = false;
   bool was_active = false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -217,12 +221,14 @@ void FallbackLayer::configure(obs_source_t *owner, FallbackState state, const Fa
       return;
     old_child = layer.child;
     old_background = layer.background;
+    was_ready = layer.ready;
     was_active = layer.active;
     layer.child = nullptr;
     layer.background = nullptr;
+    layer.ready = false;
     layer.active = false;
   }
-  release_layer(old_child, old_background, was_active);
+  release_layer(old_child, old_background, was_ready, was_active);
 
   if (!spec.draws_itself())
     return;
@@ -236,29 +242,29 @@ void FallbackLayer::configure(obs_source_t *owner, FallbackState state, const Fa
     std::lock_guard<std::mutex> lock(mutex_);
     layers_[index].child = child;
     layers_[index].background = background;
+    // Whatever a tick decided in the meantime had nothing to act on.
+    layers_[index].ready = false;
+    layers_[index].active = false;
   }
   ensure_filter(owner);
 }
 
-void FallbackLayer::set_active(Layer &layer, bool active) {
-  if (active == layer.active)
-    return;
+// Showing keeps content loaded. Active also counts as showing, and runs it: a video
+// starts from the top and a page that wasn't loaded opens from scratch.
+void FallbackLayer::set_refs(Layer &layer, bool ready, bool active) {
   for (obs_source_t *source : {layer.child, layer.background}) {
     if (!source)
       continue;
-    // A video starts from the top and a page only runs while it's on screen.
-    if (active) {
-      obs_source_inc_active(source);
-      obs_source_inc_showing(source);
-    } else {
-      obs_source_dec_showing(source);
-      obs_source_dec_active(source);
-    }
+    if (ready != layer.ready)
+      ready ? obs_source_inc_showing(source) : obs_source_dec_showing(source);
+    if (active != layer.active)
+      active ? obs_source_inc_active(source) : obs_source_dec_active(source);
   }
+  layer.ready = ready;
   layer.active = active;
 }
 
-void FallbackLayer::tick(float seconds) {
+void FallbackLayer::tick(float seconds, bool visible) {
   const int shown = shown_.load();
   std::lock_guard<std::mutex> lock(mutex_);
   for (int i = 0; i < STATES; ++i) {
@@ -270,8 +276,9 @@ void FallbackLayer::tick(float seconds) {
     const float step = duration_ms > 0 ? seconds * 1000.0f / duration_ms : 1.0f;
     layer.progress = std::clamp(layer.progress + (wanted ? step : -step), 0.0f, 1.0f);
 
-    // Stays alive through its way out.
-    set_active(layer, wanted || layer.progress > 0.0f);
+    // Stays alive through its way out, unless the source itself has left the screen.
+    // Sources tick in every scene, so a stream that's down elsewhere still gets here.
+    set_refs(layer, visible && layer.spec.preloads(), visible && (wanted || layer.progress > 0.0f));
   }
 }
 
@@ -461,8 +468,9 @@ static uint32_t filter_height(void *param) {
 }
 
 static void filter_tick(void *param, float seconds) {
-  if (FallbackLayer *layer = layer_of(static_cast<FilterData *>(param)->self))
-    layer->tick(seconds);
+  obs_source_t *self = static_cast<FilterData *>(param)->self;
+  if (FallbackLayer *layer = layer_of(self))
+    layer->tick(seconds, obs_source_showing(obs_filter_get_target(self)));
 }
 
 static void filter_render(void *param, gs_effect_t *) {

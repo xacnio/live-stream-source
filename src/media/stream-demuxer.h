@@ -44,6 +44,7 @@ private:
   AVFormatContext *fmt_ctx_ = nullptr;
   int video_idx_ = -1;
   int audio_idx_ = -1;
+  int probed_streams_ = -1; // how many the probe found, -1 when there wasn't one
   std::atomic<bool> abort_{false};
   std::atomic<int64_t> open_deadline_ms_{0};
   static constexpr int64_t OPEN_DEADLINE_MS = 5000;
