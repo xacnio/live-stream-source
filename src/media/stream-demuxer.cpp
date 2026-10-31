@@ -236,6 +236,8 @@ int StreamDemuxer::open(const std::string &url, StreamType type) {
     }
   }
 
+  probed_streams_ = static_cast<int>(fmt_ctx_->nb_streams);
+
   int discarded = 0;
   for (unsigned i = 0; i < fmt_ctx_->nb_streams; ++i) {
     if ((int)i != video_idx_ && (int)i != audio_idx_) {
@@ -429,6 +431,7 @@ void StreamDemuxer::close() {
 
   video_idx_ = -1;
   audio_idx_ = -1;
+  probed_streams_ = -1;
 }
 
 int StreamDemuxer::read_packet(AVPacket *pkt) {
@@ -454,6 +457,16 @@ int StreamDemuxer::read_packet(AVPacket *pkt) {
   if (rp_log <= 5 || ret < 0) {
     lss_log_debug("read_packet: av_read_frame returned %d", ret);
     rp_log++;
+  }
+
+  // A live stream's sound can arrive seconds ahead of its picture, and the probe has
+  // to end somewhere. Nothing reads a stream found after it, so open again to get it.
+  if (ret >= 0 && video_idx_ < 0 && probed_streams_ >= 0 &&
+      pkt->stream_index >= probed_streams_ &&
+      fmt_ctx_->streams[pkt->stream_index]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+    lss_log_info("Video arrived after the probe, reconnecting");
+    av_packet_unref(pkt);
+    return AVERROR(EIO);
   }
 
   return ret;
