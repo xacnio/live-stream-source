@@ -91,6 +91,7 @@ public:
   static void s_update(void *data, obs_data_t *settings);
   static void s_activate(void *data);
   static void s_deactivate(void *data);
+  static void s_load(void *data, obs_data_t *settings);
   static void s_video_tick(void *data, float seconds);
   static const char *s_get_name(void *);
 

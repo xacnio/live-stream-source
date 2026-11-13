@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <vector>
 
 namespace lss {
 
@@ -160,23 +161,55 @@ static obs_source_t *create_child(const FallbackSpec &spec, const char *owner_uu
   return child;
 }
 
-static void find_filter(obs_source_t *, obs_source_t *filter, void *param) {
+static void collect_filters(obs_source_t *, obs_source_t *filter, void *param) {
   if (std::strcmp(obs_source_get_unversioned_id(filter), FILTER_ID) == 0)
-    *static_cast<bool *>(param) = true;
+    static_cast<std::vector<obs_source_t *> *>(param)->push_back(obs_source_get_ref(filter));
 }
 
-// One saved with the source comes back on load, so this only ever adds the first.
-static void ensure_filter(obs_source_t *owner) {
-  bool found = false;
-  obs_source_enum_filters(owner, find_filter, &found);
-  if (found)
-    return;
+// Every copy draws the whole fallback again, so a source keeps just one.
+static void tidy_filters(obs_source_t *owner, bool add) {
+  std::vector<obs_source_t *> filters;
+  obs_source_enum_filters(owner, collect_filters, &filters);
 
+  for (size_t i = 1; i < filters.size(); ++i)
+    obs_source_filter_remove(owner, filters[i]);
+  if (filters.size() > 1)
+    lss_log_info("Fallback: removed %zu extra filters", filters.size() - 1);
+  for (obs_source_t *filter : filters)
+    obs_source_release(filter);
+
+  if (!filters.empty() || !add)
+    return;
   obs_source_t *filter = obs_source_create(FILTER_ID, obs_module_text("FallbackFilter"), nullptr, nullptr);
   if (filter) {
     obs_source_filter_add(owner, filter);
     obs_source_release(filter);
   }
+}
+
+void FallbackLayer::remove_extra_filters(obs_source_t *owner) { tidy_filters(owner, false); }
+
+// A saved source gets its filters back only after it's created, and a UI task queued
+// from the UI thread runs on the spot. Going by way of the graphics thread puts this
+// after the load, so it finds the saved filter instead of adding another one.
+static void ensure_filter(obs_source_t *owner) {
+  obs_weak_source_t *weak = obs_source_get_weak_source(owner);
+  obs_queue_task(
+      OBS_TASK_GRAPHICS,
+      [](void *param) {
+        obs_queue_task(
+            OBS_TASK_UI,
+            [](void *param) {
+              auto *weak = static_cast<obs_weak_source_t *>(param);
+              if (obs_source_t *owner = obs_weak_source_get_source(weak)) {
+                tidy_filters(owner, true);
+                obs_source_release(owner);
+              }
+              obs_weak_source_release(weak);
+            },
+            param, false);
+      },
+      weak, false);
 }
 
 static void release_layer(obs_source_t *child, obs_source_t *background, bool ready, bool active) {
