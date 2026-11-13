@@ -79,6 +79,9 @@ public:
 
   static void register_filter();
 
+  // UI thread, once a saved source has its filters back.
+  static void remove_extra_filters(obs_source_t *owner);
+
   // UI thread: creating a browser or media source anywhere else isn't safe.
   void configure(obs_source_t *owner, FallbackState state, const FallbackSpec &spec);
 

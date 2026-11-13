@@ -2243,6 +2243,10 @@ void LiveStreamSource::s_activate(void *d) {
 void LiveStreamSource::s_deactivate(void *d) {
   static_cast<LiveStreamSource *>(d)->deactivate();
 }
+// Older versions added a fallback filter on every load, so saved sources can have dozens.
+void LiveStreamSource::s_load(void *d, obs_data_t *) {
+  FallbackLayer::remove_extra_filters(static_cast<LiveStreamSource *>(d)->obs_source_);
+}
 void LiveStreamSource::s_video_tick(void *d, float seconds) {
   static_cast<LiveStreamSource *>(d)->video_tick(seconds);
 }
@@ -2890,6 +2894,7 @@ void register_live_stream_source() {
   live_stream_source_info.update = LiveStreamSource::s_update;
   live_stream_source_info.activate = LiveStreamSource::s_activate;
   live_stream_source_info.deactivate = LiveStreamSource::s_deactivate;
+  live_stream_source_info.load = LiveStreamSource::s_load;
   live_stream_source_info.video_tick = LiveStreamSource::s_video_tick;
   live_stream_source_info.get_properties = LiveStreamSource::get_properties;
   live_stream_source_info.get_defaults = LiveStreamSource::get_defaults;
